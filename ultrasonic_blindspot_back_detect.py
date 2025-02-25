@@ -28,9 +28,9 @@ def measure_distance():
     elif distance_right < 101:
         distance_label.config(fg="red", text="Right Blind Spot Warning:\nVehicle is {} cm away!\n".format(distance_right))
     elif distance_back < 101:
-        distance_label.config(fg="red", text="Warning: Object Behind Vehicle {} cm away\n".format(distance_back))
+        distance_label.config(fg="red", text="Warning: Object Behind \n Vehicle {} cm away\n".format(distance_back))
     else:
-        distance_label.config(fg="blue", text="bye")  # Display "bye" when nothing is detected
+        distance_label.config(fg="blue", text="Nothing Detected")  # Display "bye" when nothing is detected
 
     window.after(500, measure_distance)  # Schedule next measurement
 
