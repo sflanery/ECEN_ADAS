@@ -1,78 +1,56 @@
-from picamera2 import Picamera2
-#installation complete
 import cv2
-#installation complete
 import numpy as np
-import threading
+from picamera2 import Picamera2
 
-# Initialize both cameras
-picam1 = Picamera2(0)  # IMX219
-picam2 = Picamera2(1)  # OV5647
+# Initialize cameras
+camera1 = Picamera2(0)  # IMX219
+camera2 = Picamera2(1)  # OV5647
 
-# Configure both cameras
-picam1.configure(picam1.create_preview_configuration(main={"size": (640, 480)}))
-picam2.configure(picam2.create_preview_configuration(main={"size": (640, 480)}))
+# Configure cameras
+camera1.configure(camera1.create_preview_configuration(main={"size": (640, 480)}))
+camera2.configure(camera2.create_preview_configuration(main={"size": (640, 480)}))
 
-# Start both cameras
-picam1.start()
-picam2.start()
+camera1.start()
+camera2.start()
 
-def detect_vertical_lines(camera, window_name):
-    while True:
-        # Capture frame
-        frame = camera.capture_array()
+def detect_vertical_lines(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 100, minLineLength=50, maxLineGap=10)
+    
+    if lines is not None:
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            angle = np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi
+            if abs(angle) > 80 and abs(angle) < 100:  # Near vertical
+                return True, lines
+    return False, None
 
-        # Convert to grayscale
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+while True:
+    frame1 = camera1.capture_array()  # Get frame from camera 1
+    frame2 = camera2.capture_array()  # Get frame from camera 2
+    
+    detected1, lines1 = detect_vertical_lines(frame1)
+    detected2, lines2 = detect_vertical_lines(frame2)
+    
+    if detected1 or detected2:
+        alert_text = "Vertical Line Detected!"
+    else:
+        alert_text = "Nothing Detected"
+    
+    # Display alert text on frames
+    cv2.putText(frame1, alert_text, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+    cv2.putText(frame2, alert_text, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+    
+    # Show frames
+    cv2.imshow("Camera 1", frame1)
+    cv2.imshow("Camera 2", frame2)
+    
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
 
-        # Apply edge detection
-        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-
-        # Detect lines using Hough Transform
-        lines = cv2.HoughLines(edges, 1, np.pi / 180, 100)
-
-        vertical_line_detected = False
-
-
-    # 3/4/25: Refine this algorithm right here, understand how it works and perfect it based off of the lane
-        if lines is not None:
-            for rho, theta in lines[:, 0]:
-                if 85 < np.degrees(theta) < 95:  # Filter vertical lines
-                    vertical_line_detected = True
-                    a, b = np.cos(theta), np.sin(theta)
-                    x0, y0 = a * rho, b * rho
-                    x1, y1 = int(x0 + 1000 * (-b)), int(y0 + 1000 * (a))
-                    x2, y2 = int(x0 - 1000 * (-b)), int(y0 - 1000 * (a))
-                    cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    #deep dive
-
-        # Display detection status
-        if vertical_line_detected:
-            cv2.putText(frame, "Vertical Line Detected", (50, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                        
-# Add conditionals for when the car is not detecting anything, keep looking until something is found
-
-        # Show output
-        cv2.imshow(window_name, frame)
-    #figure out why this is messing up, camera one is sometimes a back screen. Not the biggest deal in the world as long as it can detect lines
-        cv2.imshow(f'Edges {window_name}', edges)
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-#Testing once perfected: try horizontal and diagnoal lines to make sure it is perfected
-# all packages are installed as is, please do not corrupt the pi by trying to add more
-
-# Run both cameras in separate threads
-thread1 = threading.Thread(target=detect_vertical_lines, args=(picam1, "Camera 1 (OV5647)"))
-thread2 = threading.Thread(target=detect_vertical_lines, args=(picam2, "Camera 2 (IMX219)"))
-
-thread1.start()
-thread2.start()
-
-# This will eventually be an infinite loop, for now it is here purely for debugging purposes
-thread1.join()
+# Cleanup
+cv2.destroyAllWindows()
 thread2.join()
 
 cv2.destroyAllWindows()
