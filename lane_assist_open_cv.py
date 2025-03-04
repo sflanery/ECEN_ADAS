@@ -10,14 +10,18 @@ camera2 = Picamera2(1)  # OV5647
 camera1.configure(camera1.create_preview_configuration(main={"size": (640, 480)}))
 camera2.configure(camera2.create_preview_configuration(main={"size": (640, 480)}))
 
+# start the threads
 camera1.start()
 camera2.start()
 
+#detect the vertical lines using cv2 image recognition
 def detect_vertical_lines(frame):
+#configuration stuff
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 50, 150, apertureSize=3)
     lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 100, minLineLength=50, maxLineGap=10)
     
+    # if there is a line present
     if lines is not None:
         for line in lines:
             x1, y1, x2, y2 = line[0]
@@ -29,12 +33,15 @@ def detect_vertical_lines(frame):
 while True:
     frame1 = camera1.capture_array()  # Get frame from camera 1
     frame2 = camera2.capture_array()  # Get frame from camera 2
-    
+  
     detected1, lines1 = detect_vertical_lines(frame1)
     detected2, lines2 = detect_vertical_lines(frame2)
     
-    if detected1 or detected2:
-        alert_text = "Vertical Line Detected!"
+# If a vertical line is detected
+    if detected1:
+        alert_text = "Vertical Line Detected! - OV5647"
+    elif detected2:
+        alert_text = "Vertical Line Detected! - IMX219"
     else:
         alert_text = "Nothing Detected"
     
@@ -51,6 +58,4 @@ while True:
 
 # Cleanup
 cv2.destroyAllWindows()
-thread2.join()
 
-cv2.destroyAllWindows()
