@@ -31,8 +31,8 @@ def measure_distance():
         distance_label.config(fg="red", text="Right Blind Spot Warning:\nVehicle is {} cm away!\n".format(distance_right))
     elif distance_back < 101:
         distance_label.config(fg="red", text="Warning: Object Behind \n Vehicle {} cm away\n".format(distance_back))
-    elif distance_front < 301:
-        disatance_label.config(fg = "red", text ="Warning: Object In front \n Vehicle {} cm away".format(distance_front))
+    elif distance_front < 201:
+        distance_label.config(fg = "red", text ="Warning: Object In front \n Vehicle {} cm away".format(distance_front))
     else:
         distance_label.config(fg="blue", text="Nothing Detected")  # Display "bye" when nothing is detected
 
@@ -43,3 +43,4 @@ measure_distance()
 
 # Run the Tkinter event loop
 window.mainloop()
+
