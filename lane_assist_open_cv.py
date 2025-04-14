@@ -30,7 +30,7 @@ def detect_vertical_lines(frame):
             x1, y1, x2, y2 = line[0]
             angle = np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi
             if abs(angle) > 80 and abs(angle) < 100:  # Near vertical
-                # check if the angle conditions are true, adjust for margain of error
+                # check if the angle conditions are true, adjust for margain ofb error
                 return True, lines
     return False, None
 
@@ -44,9 +44,9 @@ while True:
 # If a vertical line is detected
     if detected1:
         # eventually alert the user - robert's subsystem
-        alert_text = "Vertical Line Detected! - OV5647"
+        alert_text = "Lane Detected! - Right Side"
     elif detected2:
-        alert_text = "Vertical Line Detected! - IMX219"
+        alert_text = "Lane Detected! - Left Side"
     else:
         alert_text = "Nothing Detected"
     
@@ -65,3 +65,4 @@ while True:
 
 # Cleanup
 cv2.destroyAllWindows()
+
