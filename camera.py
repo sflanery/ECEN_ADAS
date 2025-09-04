@@ -1,36 +1,59 @@
 from ultralytics import YOLO
 import cv2
+import threading
 
-# path to model
-model = YOLO("Pedestrian_models/pedestrian1/weights/pedestrian_detection.pt")
+# Load YOLOv8n model for speed on Raspberry Pi
+model = YOLO("Traffic_lights_detection.pt")  # tiny model
 
-#default camera
-cap = cv2.VideoCapture(0)
+# MJPG-Streamer URL
+stream_url = "http://127.0.0.1:8080/?action=stream"
+cap = cv2.VideoCapture(stream_url)
 
 if not cap.isOpened():
-    print("Error: Could not open video stream.")
+    print("Error: Cannot open video stream.")
     exit()
 
+# Shared frame and lock
+frame = None
+lock = threading.Lock()
+running = True
+
+# Thread to continuously grab frames
+def grab_frames():
+    global frame, running
+    while running:
+        ret, f = cap.read()
+        if not ret:
+            continue
+        with lock:
+            frame = cv2.resize(f, (320, 240))  # resize for speed
+
+# Start frame grabbing thread
+thread = threading.Thread(target=grab_frames)
+thread.start()
+
+# Main loop: run YOLO inference
+last_annotated = None
 while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+    with lock:
+        if frame is None:
+            continue
+        current_frame = frame.copy()
 
-    # if window resize is needed
-    # frame = cv2.resize(frame, (640, 640))
+    # Run YOLO inference
+    results = model.predict(current_frame, conf=0.3, verbose=False)
+    annotated = results[0].plot()
+    last_annotated = annotated
 
-    # perform inference with the model on the current frame
-    results = model(frame)
+    # Display annotated frame
+    cv2.imshow("YOLO Detection", last_annotated)
 
-    # annotate the frame with detection results
-    annotated_frame = results[0].plot()
-
-    # display the frame
-    cv2.imshow("person", annotated_frame)
-
-    # close camera if 'q' is pressed
     if cv2.waitKey(1) & 0xFF == ord('q'):
+        running = False
         break
 
+# Cleanup
+thread.join()
 cap.release()
 cv2.destroyAllWindows()
+
