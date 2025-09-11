@@ -2,9 +2,9 @@ from ultralytics import YOLO
 import cv2, sqlite3, time
 
 # ---------- Load models ----------
-light_model = YOLO("runs/detect/train7/weights/Traffic_lights_detection.pt")
-sign_model  = YOLO("Traffic_signs_training/experiment_2/weights/Traffic_sign_detection.pt")
-ped_model   = YOLO("pedestrian_detection1.pt")
+light_model = YOLO("/home/sarsa/Traffic_lights_detection.pt")
+sign_model  = YOLO("/home/sarsa/Traffic_sign_detection.pt")
+ped_model   = YOLO("/home/sarsa/pedestrian_detection.pt")
 
 # ---------- Video capture ----------
 cap = cv2.VideoCapture(0)
@@ -71,3 +71,4 @@ finally:
     cap.release()
     cv2.destroyAllWindows()  # needed for waitKey cleanup
     conn.close()
+
