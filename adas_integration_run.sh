@@ -13,9 +13,12 @@ if [[ -z "$VIRTUAL_ENV" ]]; then
     exit 1
 fi
 
+
+# if cant open stream, run in cmd line: v4l2-ctl --list-devices
+# then find which number (X) the camera is assigned to on line 21 /dev/videoX
 # ----------- MJPG-STREAMER ----------- #
 echo "Starting MJPG-Streamer on port 8090..."
-mjpg_streamer -i "input_uvc.so -d /dev/video0 -r 640x480 -f 640" \
+mjpg_streamer -i "input_uvc.so -d /dev/video16 -r 640x480 -f 30" \
                -o "output_http.so -p 8090 -w ./www" &
 MJPG_PID=$!
 
@@ -23,13 +26,12 @@ sleep 2  # give it a moment to start
 
 # ----------- BACKEND ----------- #
 echo "Starting backend..."
-export FLASK_APP=app.py        # <-- Replace with your Flask entrypoint
-export FLASK_ENV=development
-flask run --host=127.0.0.1 --port=8080 &
-FLASK_PID=$!
+python3 /home/sarsa/dashtest_new/dashtest/backend_server/app.py &  # <-- replace with actual filename
+BACKEND_PID=$!
+sleep 3  # give backend time to start
 
 # Optional: run test script for debugging / live alerts
-python3 /home/sarsa/dashtest_new/dashtest/backend_server/test_script.py &
+#python3 /home/sarsa/dashtest_new/dashtest/backend_server/test_script.py &
 
 # ----------- ADDITIONAL PYTHON SCRIPTS ----------- #
 echo "Starting additional Python scripts..."
@@ -41,12 +43,12 @@ echo "Starting additional Python scripts..."
 # ----------- FRONTEND ----------- #
 echo "Starting frontend..."
 cd /home/sarsa/dashtest_new/dashtest/car_dashboard
-npm run serve &
+ npm run serve &
 
 # ----------- CLEANUP ON EXIT ----------- #
 cleanup() {
     echo "Stopping all processes..."
-    kill $MJPG_PID $FLASK_PID
+    kill $MJPG_PID $BACKEND_PID
     pkill -P $$  # kill remaining child processes
     echo "All processes stopped."
 }
