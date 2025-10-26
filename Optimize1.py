@@ -4,6 +4,7 @@
 import time
 import sqlite3
 from pathlib import Path
+from collections import Counter, defaultdict
 
 import cv2
 import numpy as np
@@ -51,7 +52,6 @@ cur.execute("DELETE FROM traffic_signs;")
 # cur.execute("DELETE FROM sqlite_sequence WHERE name='traffic_signs';")
 conn.commit()
 
-
 # =========================
 # Utility functions
 # =========================
@@ -67,11 +67,9 @@ def letterbox(img: np.ndarray, size: int) -> np.ndarray:
     canvas[top:top + nh, left:left + nw] = resized
     return canvas
 
-
 def yolo_infer(model: YOLO, frame: np.ndarray, classes=None):
     """Run one YOLO model on a frame with fixed settings."""
     inp = letterbox(frame, IMGSZ)
-    # Predict on CPU explicitly
     return model.predict(
         inp,
         device="cpu",
@@ -83,6 +81,32 @@ def yolo_infer(model: YOLO, frame: np.ndarray, classes=None):
         verbose=False
     )[0]
 
+def summarize_detections(results_dict):
+    """
+    Build a human-readable summary string and a boolean flag.
+    results_dict: {"light": r, "sign": r, "pedestrian": r}
+    Returns: detected_any(bool), summary_str(str)
+    """
+    per_type_counts = defaultdict(Counter)
+    detected_any = False
+
+    for det_type, res in results_dict.items():
+        if res is None or res.boxes is None or len(res.boxes) == 0:
+            continue
+        names = res.names
+        for cls_id in res.boxes.cls.tolist():
+            per_type_counts[det_type][names[int(cls_id)]] += 1
+            detected_any = True
+
+    if not detected_any:
+        return False, "none"
+
+    # Build compact "type:class1(n),class2(m)" segments
+    segments = []
+    for det_type, counter in per_type_counts.items():
+        parts = [f"{cls}({n})" for cls, n in counter.most_common()]
+        segments.append(f"{det_type}:" + ",".join(parts))
+    return True, " | ".join(segments)
 
 # =========================
 # Video Capture
@@ -133,18 +157,12 @@ try:
         infer_ms = (time.perf_counter() - t0) * 1000.0
 
         # -------- Consolidated DB write per frame --------
-        # Insert detections from all cached results; if none, insert a "none" row.
         detected_any = False
-
-        # You can batch-insert for fewer commits; here we keep it simple and clear.
         for key, res in last_results.items():
             if res is None or res.boxes is None or len(res.boxes) == 0:
                 continue
-
             names = res.names
-            cls_ids = res.boxes.cls.tolist()
-            # Write one row per class instance (you can aggregate if preferred)
-            for cls_id in cls_ids:
+            for cls_id in res.boxes.cls.tolist():
                 cls_name = names[int(cls_id)]
                 cur.execute(
                     """
@@ -156,7 +174,6 @@ try:
                 detected_any = True
 
         if not detected_any:
-            # No detections among cached results
             cur.execute(
                 """
                 INSERT INTO traffic_signs (type, value, distance, active)
@@ -168,6 +185,9 @@ try:
         conn.commit()
 
         # -------- Telemetry & pacing --------
+        # Build a readable summary for the console
+        det_flag, det_summary = summarize_detections(last_results)
+
         frame_idx += 1
         k += 1
 
@@ -177,7 +197,8 @@ try:
             eff_fps = 1000.0 / max(loop_ms, 1.0)
             print(
                 f"Frame {frame_idx} | this model {infer_ms:.0f} ms | "
-                f"loop {loop_ms:.0f} ms | eff FPS≈{eff_fps:.1f}"
+                f"loop {loop_ms:.0f} ms | eff FPS={eff_fps:.1f} | "
+                f"detected={det_flag} | {('Detected: ' + det_summary) if det_flag else 'Detected: none'}"
             )
             last_print = now
 
@@ -187,10 +208,6 @@ try:
         if spent < budget:
             time.sleep(budget - spent)
 
-        # Optional: quit on 'q' if running in a desktop session
-        # if cv2.waitKey(1) & 0xFF == ord('q'):
-        #     break
-
 except KeyboardInterrupt:
     print("Interrupted by user.")
 finally:
@@ -198,4 +215,6 @@ finally:
     cv2.destroyAllWindows()
     conn.close()
     print("Clean shutdown.")
+
+
 
