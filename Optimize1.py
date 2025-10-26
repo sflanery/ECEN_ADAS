@@ -1,72 +1,78 @@
-import cv2, time, threading, numpy as np
-from collections import deque
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import time
+import sqlite3
+from pathlib import Path
+
+import cv2
+import numpy as np
+import torch
 from ultralytics import YOLO
 
-# --- Settings you can play with ---
-STREAM_URL = "http://127.0.0.1:8090/?action=stream"
-IMGSZ      = 416     # try 384/416/512
-CONF       = 0.25
-IOU        = 0.45
-MAX_DET    = 10
-TARGET_FPS = 10      # budget your loop for ~10 fps
+# =========================
+# Tunables (adjust as needed)
+# =========================
+STREAM_URL = "http://127.0.0.1:8090/?action=stream"  # your stream
+IMGSZ = 384                 # try 320 / 384 / 416; smaller = faster
+CONF, IOU = 0.25, 0.45
+MAX_DET = 12
+TARGET_FPS = 10             # pacing target, prevents thrash (not a guarantee)
 
-# Optional: limit OpenCV threads on Pi to avoid contention
+# Optional: limit OpenCV threads on ARM
 cv2.setNumThreads(1)
 
-# --- Load models (use your actual paths) ---
+# Optional: limit torch threading on ARM (Pi 5: 4 big cores)
+torch.set_num_threads(4)
+torch.set_num_interop_threads(1)
+
+# =========================
+# Load models (CPU on Pi)
+# =========================
 light_model = YOLO("/home/sarsa/Traffic_lights_detection.pt")
-sign_model  = YOLO("/home/sarsa/new_traffic_signs.pt")
+sign_model  = YOLO("/home/sarsa/new_traffic_signs.pt")  # keep the newer one
 ped_model   = YOLO("/home/sarsa/pedestrian_detection.pt")
 
-# If you only need some classes, you can predefine them (example; adjust to your model's class indices)
-CLASSES_SIGN = None  # e.g., [0, 1, 2]  # set to None to keep all
+# If you only care about specific classes in a model, set indices here (else None)
+CLASSES_LIGHT = None  # e.g., [0,1,2]
+CLASSES_SIGN  = None
+CLASSES_PED   = None
 
-# --- Threaded frame grabber: always keep only the latest frame ---
-class FrameGrabber:
-    def __init__(self, src):
-        self.cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
-        if not self.cap.isOpened():
-            raise RuntimeError("Failed to open stream")
-        self.q = deque(maxlen=1)
-        self.running = True
-        self.t = threading.Thread(target=self._loop, daemon=True)
-        self.t.start()
+# =========================
+# DB setup
+# =========================
+base_dir = Path(__file__).parent.resolve()
+db_path = base_dir / "dashtest_new/dashtest/backend_server/dashboard.db"
+conn = sqlite3.connect(str(db_path))
+cur = conn.cursor()
 
-    def _loop(self):
-        while self.running:
-            ok, frame = self.cap.read()
-            if not ok:
-                time.sleep(0.02)
-                continue
-            # Some MJPEG feeds are gray; normalize to 3-ch
-            if frame.ndim == 2:
-                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-            self.q.append(frame)
+# Clear table (and optionally reset autoincrement sequence)
+cur.execute("DELETE FROM traffic_signs;")
+# cur.execute("DELETE FROM sqlite_sequence WHERE name='traffic_signs';")
+conn.commit()
 
-    def read(self):
-        return self.q[-1] if self.q else None
 
-    def release(self):
-        self.running = False
-        self.t.join(timeout=1.0)
-        self.cap.release()
-
-def letterbox_resize(image, size):
-    """Resize & pad to (size, size) while keeping aspect ratio."""
-    h, w = image.shape[:2]
-    scale = min(size / h, size / w)
-    nh, nw = int(h * scale), int(w * scale)
-    resized = cv2.resize(image, (nw, nh), interpolation=cv2.INTER_LINEAR)
+# =========================
+# Utility functions
+# =========================
+def letterbox(img: np.ndarray, size: int) -> np.ndarray:
+    """Resize & pad to (size, size) keeping aspect ratio (BGR uint8 in, out)."""
+    h, w = img.shape[:2]
+    r = min(size / h, size / w)
+    nh, nw = int(h * r), int(w * r)
+    resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
     canvas = np.zeros((size, size, 3), dtype=np.uint8)
     top = (size - nh) // 2
     left = (size - nw) // 2
-    canvas[top:top+nh, left:left+nw] = resized
+    canvas[top:top + nh, left:left + nw] = resized
     return canvas
 
-def run_once(model, frame, classes=None):
-    # Pre-resize to reduce model’s work; Ultralytics accepts BGR uint8
-    inp = letterbox_resize(frame, IMGSZ)
-    r = model.predict(
+
+def yolo_infer(model: YOLO, frame: np.ndarray, classes=None):
+    """Run one YOLO model on a frame with fixed settings."""
+    inp = letterbox(frame, IMGSZ)
+    # Predict on CPU explicitly
+    return model.predict(
         inp,
         device="cpu",
         imgsz=IMGSZ,
@@ -76,52 +82,120 @@ def run_once(model, frame, classes=None):
         classes=classes,
         verbose=False
     )[0]
-    return r
 
-def main():
-    grab = FrameGrabber(STREAM_URL)
-    print("Stream opened. Press Ctrl+C to stop.")
-    last_print = 0
-    frame_count = 0
 
-    try:
-        while True:
-            start = time.perf_counter()
-            frame = grab.read()
-            if frame is None:
-                time.sleep(0.01)
+# =========================
+# Video Capture
+# =========================
+cap = cv2.VideoCapture(STREAM_URL, cv2.CAP_FFMPEG)
+if not cap.isOpened():
+    raise RuntimeError("Failed to open stream. Verify the URL/FFMPEG/OpenCV build.")
+
+print("Stream opened successfully.")
+frame_idx = 0
+k = 0
+last_print = 0.0
+
+# cached latest results (we update only one each frame)
+last_results = {"light": None, "sign": None, "pedestrian": None}
+
+# =========================
+# Main loop
+# =========================
+try:
+    while True:
+        loop_start = time.perf_counter()
+
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            # Stream hiccup—sleep briefly and continue
+            time.sleep(0.01)
+            continue
+
+        # Normalize to 3-channel if stream is grayscale
+        if frame.ndim == 2:
+            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+
+        # -------- round-robin: one model per frame --------
+        sel = k % 3
+        t0 = time.perf_counter()
+
+        if sel == 0:
+            # Traffic lights this frame
+            last_results["light"] = yolo_infer(light_model, frame, CLASSES_LIGHT)
+        elif sel == 1:
+            # Traffic signs this frame
+            last_results["sign"] = yolo_infer(sign_model, frame, CLASSES_SIGN)
+        else:
+            # Pedestrians this frame
+            last_results["pedestrian"] = yolo_infer(ped_model, frame, CLASSES_PED)
+
+        infer_ms = (time.perf_counter() - t0) * 1000.0
+
+        # -------- Consolidated DB write per frame --------
+        # Insert detections from all cached results; if none, insert a "none" row.
+        detected_any = False
+
+        # You can batch-insert for fewer commits; here we keep it simple and clear.
+        for key, res in last_results.items():
+            if res is None or res.boxes is None or len(res.boxes) == 0:
                 continue
 
-            t0 = time.perf_counter()
-            # --- Run the three models (you can stagger or skip to save time) ---
-            # Option A: run all three every frame (heavier)
-            light_r = run_once(light_model, frame, classes=None)
-            sign_r  = run_once(sign_model,  frame, classes=CLASSES_SIGN)
-            ped_r   = run_once(ped_model,   frame, classes=None)
-            t1 = time.perf_counter()
+            names = res.names
+            cls_ids = res.boxes.cls.tolist()
+            # Write one row per class instance (you can aggregate if preferred)
+            for cls_id in cls_ids:
+                cls_name = names[int(cls_id)]
+                cur.execute(
+                    """
+                    INSERT INTO traffic_signs (type, value, distance, active)
+                    VALUES (?,?,?,?)
+                    """,
+                    (f"{key}:{cls_name}", "50", frame_idx, 1)
+                )
+                detected_any = True
 
-            # Example: if too slow, only run pedestrians every 2nd frame:
-            # if frame_count % 2 == 0: ped_r = run_once(ped_model, frame)
+        if not detected_any:
+            # No detections among cached results
+            cur.execute(
+                """
+                INSERT INTO traffic_signs (type, value, distance, active)
+                VALUES (?,?,?,?)
+                """,
+                ("none", "50", frame_idx, 0)
+            )
 
-            # ---- Example stats to see where time goes ----
-            loop_ms = (time.perf_counter() - start) * 1000
-            infer_ms = (t1 - t0) * 1000
-            if time.time() - last_print > 1.0:
-                print(f"Loop: {loop_ms:.1f} ms  (Inference: {infer_ms:.1f} ms)  FPS≈{1000.0/max(loop_ms,1):.1f}")
-                last_print = time.time()
+        conn.commit()
 
-            frame_count += 1
+        # -------- Telemetry & pacing --------
+        frame_idx += 1
+        k += 1
 
-            # --- simple pacing to avoid thrashing CPU (optional) ---
-            budget = 1.0 / TARGET_FPS
-            spent = time.perf_counter() - start
-            if spent < budget:
-                time.sleep(budget - spent)
+        loop_ms = (time.perf_counter() - loop_start) * 1000.0
+        now = time.time()
+        if now - last_print > 1.0:
+            eff_fps = 1000.0 / max(loop_ms, 1.0)
+            print(
+                f"Frame {frame_idx} | this model {infer_ms:.0f} ms | "
+                f"loop {loop_ms:.0f} ms | eff FPS≈{eff_fps:.1f}"
+            )
+            last_print = now
 
-    except KeyboardInterrupt:
-        pass
-    finally:
-        grab.release()
+        # soft pacing to avoid pegging CPU; reduces jitter
+        budget = 1.0 / TARGET_FPS
+        spent = (time.perf_counter() - loop_start)
+        if spent < budget:
+            time.sleep(budget - spent)
 
-if __name__ == "__main__":
-    main()
+        # Optional: quit on 'q' if running in a desktop session
+        # if cv2.waitKey(1) & 0xFF == ord('q'):
+        #     break
+
+except KeyboardInterrupt:
+    print("Interrupted by user.")
+finally:
+    cap.release()
+    cv2.destroyAllWindows()
+    conn.close()
+    print("Clean shutdown.")
+
