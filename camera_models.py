@@ -3,7 +3,7 @@ import cv2, sqlite3, time
 
 # ---------- Load models ----------
 light_model = YOLO("/home/sarsa/Traffic_lights_detection.pt")
-sign_model  = YOLO("/home/sarsa/Traffic_sign_detection.pt")
+sign_model = YOLO("/home/sarsa/new_traffic_signs.pt")
 ped_model   = YOLO("/home/sarsa/pedestrian_detection.pt")
 
 # ---------- Video capture ----------
