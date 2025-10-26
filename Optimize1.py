@@ -4,7 +4,8 @@
 import time
 import sqlite3
 from pathlib import Path
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
+import threading
 
 import cv2
 import numpy as np
@@ -12,18 +13,32 @@ import torch
 from ultralytics import YOLO
 
 # =========================
-# Tunables (adjust as needed)
+# Quick health checks (optional; run manually)
+# -------------------------
+# # Temperature:
+# #   vcgencmd measure_temp
+# # Throttle flags:
+# #   vcgencmd get_throttled  (should be 0x0)
+# # Governor:
+# #   cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 # =========================
-STREAM_URL = "http://127.0.0.1:8090/?action=stream"  # your stream
-IMGSZ = 384                 # try 320 / 384 / 416; smaller = faster
+
+# =========================
+# Tunables
+# =========================
+STREAM_URL = "http://127.0.0.1:8090/?action=stream"
+IMGSZ = 384
 CONF, IOU = 0.25, 0.45
 MAX_DET = 12
-TARGET_FPS = 10             # pacing target, prevents thrash (not a guarantee)
 
-# Optional: limit OpenCV threads on ARM
+# Commit to SQLite every N frames to reduce I/O stalls
+BATCH_COMMIT_N = 15  # try 10–30
+
+# Drop pacing unless you’re comfortably > target
+TARGET_FPS = 10      # soft target; we won't sleep if we’re behind
+
+# Optional: limit OpenCV & torch threads on ARM
 cv2.setNumThreads(1)
-
-# Optional: limit torch threading on ARM (Pi 5: 4 big cores)
 torch.set_num_threads(4)
 torch.set_num_interop_threads(1)
 
@@ -31,32 +46,31 @@ torch.set_num_interop_threads(1)
 # Load models (CPU on Pi)
 # =========================
 light_model = YOLO("/home/sarsa/Traffic_lights_detection.pt")
-sign_model  = YOLO("/home/sarsa/new_traffic_signs.pt")  # keep the newer one
+sign_model  = YOLO("/home/sarsa/new_traffic_signs.pt")
 ped_model   = YOLO("/home/sarsa/pedestrian_detection.pt")
 
-# If you only care about specific classes in a model, set indices here (else None)
-CLASSES_LIGHT = None  # e.g., [0,1,2]
+CLASSES_LIGHT = None
 CLASSES_SIGN  = None
 CLASSES_PED   = None
 
 # =========================
-# DB setup
+# DB setup (WAL + batched commits)
 # =========================
 base_dir = Path(__file__).parent.resolve()
 db_path = base_dir / "dashtest_new/dashtest/backend_server/dashboard.db"
-conn = sqlite3.connect(str(db_path))
+conn = sqlite3.connect(str(db_path), check_same_thread=False)
 cur = conn.cursor()
-
-# Clear table (and optionally reset autoincrement sequence)
+cur.execute("PRAGMA journal_mode=WAL;")
+cur.execute("PRAGMA synchronous=NORMAL;")
 cur.execute("DELETE FROM traffic_signs;")
-# cur.execute("DELETE FROM sqlite_sequence WHERE name='traffic_signs';")
 conn.commit()
 
+pending_rows = []  # we’ll batch INSERTs into this and commit periodically
+
 # =========================
-# Utility functions
+# Utilities
 # =========================
 def letterbox(img: np.ndarray, size: int) -> np.ndarray:
-    """Resize & pad to (size, size) keeping aspect ratio (BGR uint8 in, out)."""
     h, w = img.shape[:2]
     r = min(size / h, size / w)
     nh, nw = int(h * r), int(w * r)
@@ -68,7 +82,6 @@ def letterbox(img: np.ndarray, size: int) -> np.ndarray:
     return canvas
 
 def yolo_infer(model: YOLO, frame: np.ndarray, classes=None):
-    """Run one YOLO model on a frame with fixed settings."""
     inp = letterbox(frame, IMGSZ)
     return model.predict(
         inp,
@@ -82,139 +95,159 @@ def yolo_infer(model: YOLO, frame: np.ndarray, classes=None):
     )[0]
 
 def summarize_detections(results_dict):
-    """
-    Build a human-readable summary string and a boolean flag.
-    results_dict: {"light": r, "sign": r, "pedestrian": r}
-    Returns: detected_any(bool), summary_str(str)
-    """
-    per_type_counts = defaultdict(Counter)
+    per_type = defaultdict(Counter)
     detected_any = False
-
     for det_type, res in results_dict.items():
         if res is None or res.boxes is None or len(res.boxes) == 0:
             continue
         names = res.names
         for cls_id in res.boxes.cls.tolist():
-            per_type_counts[det_type][names[int(cls_id)]] += 1
+            per_type[det_type][names[int(cls_id)]] += 1
             detected_any = True
-
     if not detected_any:
         return False, "none"
-
-    # Build compact "type:class1(n),class2(m)" segments
     segments = []
-    for det_type, counter in per_type_counts.items():
+    for det_type, counter in per_type.items():
         parts = [f"{cls}({n})" for cls, n in counter.most_common()]
         segments.append(f"{det_type}:" + ",".join(parts))
     return True, " | ".join(segments)
 
 # =========================
-# Video Capture
+# Threaded frame grabber (drop old frames)
 # =========================
-cap = cv2.VideoCapture(STREAM_URL, cv2.CAP_FFMPEG)
-if not cap.isOpened():
-    raise RuntimeError("Failed to open stream. Verify the URL/FFMPEG/OpenCV build.")
+class FrameGrabber:
+    def __init__(self, src):
+        self.cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
+        # reduce internal buffer if supported (no-op if not)
+        try:
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
+        if not self.cap.isOpened():
+            raise RuntimeError("Failed to open stream (check URL/FFMPEG/OpenCV).")
+        self.q = deque(maxlen=1)  # keep only the latest
+        self.running = True
+        self.th = threading.Thread(target=self._loop, daemon=True)
+        self.th.start()
 
-print("Stream opened successfully.")
-frame_idx = 0
-k = 0
-last_print = 0.0
-
-# cached latest results (we update only one each frame)
-last_results = {"light": None, "sign": None, "pedestrian": None}
-
-# =========================
-# Main loop
-# =========================
-try:
-    while True:
-        loop_start = time.perf_counter()
-
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            # Stream hiccup—sleep briefly and continue
-            time.sleep(0.01)
-            continue
-
-        # Normalize to 3-channel if stream is grayscale
-        if frame.ndim == 2:
-            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-
-        # -------- round-robin: one model per frame --------
-        sel = k % 3
-        t0 = time.perf_counter()
-
-        if sel == 0:
-            # Traffic lights this frame
-            last_results["light"] = yolo_infer(light_model, frame, CLASSES_LIGHT)
-        elif sel == 1:
-            # Traffic signs this frame
-            last_results["sign"] = yolo_infer(sign_model, frame, CLASSES_SIGN)
-        else:
-            # Pedestrians this frame
-            last_results["pedestrian"] = yolo_infer(ped_model, frame, CLASSES_PED)
-
-        infer_ms = (time.perf_counter() - t0) * 1000.0
-
-        # -------- Consolidated DB write per frame --------
-        detected_any = False
-        for key, res in last_results.items():
-            if res is None or res.boxes is None or len(res.boxes) == 0:
+    def _loop(self):
+        while self.running:
+            ok, frame = self.cap.read()
+            if not ok or frame is None:
+                # brief pause on hiccup to avoid tight spin
+                time.sleep(0.005)
                 continue
-            names = res.names
-            for cls_id in res.boxes.cls.tolist():
-                cls_name = names[int(cls_id)]
-                cur.execute(
-                    """
-                    INSERT INTO traffic_signs (type, value, distance, active)
-                    VALUES (?,?,?,?)
-                    """,
-                    (f"{key}:{cls_name}", "50", frame_idx, 1)
+            if frame.ndim == 2:
+                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            self.q.append(frame)
+
+    def read(self):
+        return self.q[-1] if self.q else None
+
+    def release(self):
+        self.running = False
+        try:
+            self.th.join(timeout=1.0)
+        except Exception:
+            pass
+        self.cap.release()
+
+# =========================
+# Main
+# =========================
+def main():
+    grab = FrameGrabber(STREAM_URL)
+    print("Stream opened successfully.")
+    frame_idx = 0
+    k = 0
+    last_print = 0.0
+
+    last_results = {"light": None, "sign": None, "pedestrian": None}
+
+    try:
+        while True:
+            loop_start = time.perf_counter()
+
+            frame = grab.read()
+            if frame is None:
+                time.sleep(0.002)
+                continue  # no frame yet; keep spinning
+
+            # ---- Round-robin: ONE model per iteration ----
+            sel = k % 3
+            t0 = time.perf_counter()
+            if sel == 0:
+                last_results["light"] = yolo_infer(light_model, frame, CLASSES_LIGHT)
+            elif sel == 1:
+                last_results["sign"] = yolo_infer(sign_model, frame, CLASSES_SIGN)
+            else:
+                last_results["pedestrian"] = yolo_infer(ped_model, frame, CLASSES_PED)
+            infer_ms = (time.perf_counter() - t0) * 1000.0
+
+            # ---- Build DB rows from ALL cached results (latest view) ----
+            detected_any = False
+            for key, res in last_results.items():
+                if res is None or res.boxes is None or len(res.boxes) == 0:
+                    continue
+                names = res.names
+                for cls_id in res.boxes.cls.tolist():
+                    cls_name = names[int(cls_id)]
+                    pending_rows.append(
+                        (f"{key}:{cls_name}", "50", frame_idx, 1)
+                    )
+                    detected_any = True
+
+            if not detected_any:
+                pending_rows.append(("none", "50", frame_idx, 0))
+
+            # ---- Commit batched rows every N frames ----
+            if frame_idx % BATCH_COMMIT_N == 0 and pending_rows:
+                cur.executemany(
+                    "INSERT INTO traffic_signs (type, value, distance, active) VALUES (?,?,?,?)",
+                    pending_rows
                 )
-                detected_any = True
+                conn.commit()
+                pending_rows.clear()
 
-        if not detected_any:
-            cur.execute(
-                """
-                INSERT INTO traffic_signs (type, value, distance, active)
-                VALUES (?,?,?,?)
-                """,
-                ("none", "50", frame_idx, 0)
+            # ---- Telemetry & adaptive pacing ----
+            frame_idx += 1
+            k += 1
+
+            loop_ms = (time.perf_counter() - loop_start) * 1000.0
+            now = time.time()
+            if now - last_print > 1.0:
+                det_flag, det_summary = summarize_detections(last_results)
+                eff_fps = 1000.0 / max(loop_ms, 1.0)
+                print(
+                    f"Frame {frame_idx} | this model {infer_ms:.0f} ms | "
+                    f"loop {loop_ms:.0f} ms | eff FPS={eff_fps:.1f} | "
+                    f"detected={det_flag} | {('Detected: ' + det_summary) if det_flag else 'Detected: none'}"
+                )
+                last_print = now
+
+            # Pace only if we’re *ahead* of target; never sleep when behind
+            if TARGET_FPS:
+                budget = 1.0 / TARGET_FPS
+                spent = (time.perf_counter() - loop_start)
+                if spent < budget:
+                    time.sleep(budget - spent)
+
+    except KeyboardInterrupt:
+        print("Interrupted by user.")
+    finally:
+        # Final flush of any pending rows
+        if pending_rows:
+            cur.executemany(
+                "INSERT INTO traffic_signs (type, value, distance, active) VALUES (?,?,?,?)",
+                pending_rows
             )
+            conn.commit()
+            pending_rows.clear()
 
-        conn.commit()
+        grab.release()
+        cv2.destroyAllWindows()
+        conn.close()
+        print("Clean shutdown.")
 
-        # -------- Telemetry & pacing --------
-        # Build a readable summary for the console
-        det_flag, det_summary = summarize_detections(last_results)
-
-        frame_idx += 1
-        k += 1
-
-        loop_ms = (time.perf_counter() - loop_start) * 1000.0
-        now = time.time()
-        if now - last_print > 1.0:
-            eff_fps = 1000.0 / max(loop_ms, 1.0)
-            print(
-                f"Frame {frame_idx} | this model {infer_ms:.0f} ms | "
-                f"loop {loop_ms:.0f} ms | eff FPS={eff_fps:.1f} | "
-                f"detected={det_flag} | {('Detected: ' + det_summary) if det_flag else 'Detected: none'}"
-            )
-            last_print = now
-
-        # soft pacing to avoid pegging CPU; reduces jitter
-        budget = 1.0 / TARGET_FPS
-        spent = (time.perf_counter() - loop_start)
-        if spent < budget:
-            time.sleep(budget - spent)
-
-except KeyboardInterrupt:
-    print("Interrupted by user.")
-finally:
-    cap.release()
-    cv2.destroyAllWindows()
-    conn.close()
-    print("Clean shutdown.")
-
-
-
+if __name__ == "__main__":
+    main()
