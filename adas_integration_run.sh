@@ -18,7 +18,7 @@ fi
 # then find which number (X) the camera is assigned to on line 21 /dev/videoX
 # ----------- MJPG-STREAMER ----------- #
 echo "Starting MJPG-Streamer on port 8090..."
-mjpg_streamer -i "input_uvc.so -d /dev/video16 -r 640x480 -f 30" \
+mjpg_streamer -i "input_uvc.so -d /dev/video0 -r 640x480 -f 30" \
                -o "output_http.so -p 8090 -w ./www" &
 MJPG_PID=$!
 
@@ -35,10 +35,11 @@ sleep 3  # give backend time to start
 
 # ----------- ADDITIONAL PYTHON SCRIPTS ----------- #
 echo "Starting additional Python scripts..."
-#/usr/bin/python3 /home/sarsa/lane_assist_dashboard.py &
+/usr/bin/python3 /home/sarsa/lane_assist_dashboard.py &
 #/usr/bin/python3 /home/sarsa/ultrasonic_integration_dashboard.py &
-#/usr/bin/python3 /home/sarsa/ultrasonic_individual_test.py &
-/usr/bin/python3 /home/sarsa/camera_models.py &
+/usr/bin/python3 /home/sarsa/ultrasonic_individual_test.py &
+#/usr/bin/python3 /home/sarsa/camera_models.py &
+/usr/bin/python3 /home/sarsa/camera_test.py & #camera_test runs smoother than camera_models
 
 # ----------- FRONTEND ----------- #
 echo "Starting frontend..."
@@ -58,5 +59,3 @@ trap cleanup SIGINT
 # Wait for all background processes
 echo "ADAS Integration running. Press Ctrl+C to stop."
 wait
-
-
