@@ -1,30 +1,27 @@
 import cv2
 import numpy as np
 from picamera2 import Picamera2
-import sqlite3
+import requests
 
 # -----------------------------
-# Database setup
+# API Configuration
 # -----------------------------
-conn = sqlite3.connect("dashboard.db")
-cursor = conn.cursor()
+BASE_URL = "http://localhost:8080"
 
-# Ensure the laneDeparture column exists
-try:
-    cursor.execute("ALTER TABLE alerts ADD COLUMN laneDeparture INTEGER DEFAULT 0;")
-except sqlite3.OperationalError:
-    pass  # Column already exists
-
-conn.commit()
-
-def log_lane_departure(detected):
-    """Logs lane detection as 1 (detected) or 0 (not detected)."""
-    #NOTE: this is only for debugging purposes, this feature will need to be removed during full scale integration
-    cursor.execute(
-        "INSERT INTO alerts (laneDeparture) VALUES (?)",
-        (1 if detected else 0,)
-    )
-    conn.commit()
+def update_lane_departure_via_api(detected):
+    """Update laneDeparture alert via Flask API."""
+    try:
+        response = requests.post(
+            f"{BASE_URL}/update_alert",
+            json={"type": "laneDeparture", "status": 1 if detected else 0},
+            timeout=1
+        )
+        if response.status_code == 200:
+            print(f"[API] Lane departure → {detected}")
+        else:
+            print(f"[API] Error: {response.status_code}")
+    except Exception as e:
+        print(f"[API] Failed to update: {e}")
 
 # -----------------------------
 # Camera setup
@@ -53,7 +50,7 @@ def preprocess_for_ov5647(frame):
 
 def detect_vertical_lines(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    # detacts vertical lines using cv2 - already trained model
+    # detects vertical lines using cv2 - already trained model
     edges = cv2.Canny(gray, 50, 150, apertureSize=3)
     lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 100, minLineLength=50, maxLineGap=10)
     # specified thickness
@@ -66,13 +63,7 @@ def detect_vertical_lines(frame):
                 return True
                 # specific angle tolerance
     return False
-def log_lane_departure(detected):
-    """Logs lane detection as 1 (detected) or 0 (not detected)."""
-    cursor.execute(
-        "INSERT INTO alerts (type, laneDeparture) VALUES (?, ?)",
-        ("laneDeparture", 1 if detected else 0)
-    )
-    conn.commit()
+
 # -----------------------------
 # State variable to prevent repeated logging
 # -----------------------------
@@ -81,37 +72,40 @@ lane_logged = False
 # -----------------------------
 # Main loop
 # -----------------------------
-while True:
-    frame1 = camera1.capture_array()
-    frame2 = camera2.capture_array()
-    frame2_processed = preprocess_for_ov5647(frame2)
+try:
+    while True:
+        frame1 = camera1.capture_array()
+        frame2 = camera2.capture_array()
+        frame2_processed = preprocess_for_ov5647(frame2)
 
-    detected = detect_vertical_lines(frame1) or detect_vertical_lines(frame2_processed)
+        detected = detect_vertical_lines(frame1) or detect_vertical_lines(frame2_processed)
 
-    # Edge-triggered logging: log only when detection state changes
-    # capturing changes for the database
-    if detected and not lane_logged:
-        log_lane_departure(True)
-        lane_logged = True
-    elif not detected and lane_logged:
-        log_lane_departure(False)
-        lane_logged = False
+        # Edge-triggered logging: log only when detection state changes
+        # capturing changes for the database
+        if detected and not lane_logged:
+            update_lane_departure_via_api(True)
+            lane_logged = True
+        elif not detected and lane_logged:
+            update_lane_departure_via_api(False)
+            lane_logged = False
 
-    # Display frames with simple 0/1 overlay
-    text = f"Lane Detected: {int(detected)}"
-    cv2.putText(frame1, text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
-    cv2.putText(frame2, text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
+        # Display frames with simple 0/1 overlay
+        text = f"Lane Detected: {int(detected)}"
+        cv2.putText(frame1, text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        cv2.putText(frame2, text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
-    cv2.imshow("Camera 1 (Right)", frame1)
-    cv2.imshow("Camera 2 (Left)", frame2)
+        cv2.imshow("Camera 1 (Right)", frame1)
+        cv2.imshow("Camera 2 (Left)", frame2)
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
-# -----------------------------
-# Cleanup
-# -----------------------------
-conn.close()
-cv2.destroyAllWindows()
-
-
+except KeyboardInterrupt:
+    print("\n[INFO] Stopping lane assist...")
+finally:
+    # -----------------------------
+    # Cleanup
+    # -----------------------------
+    update_lane_departure_via_api(False)
+    cv2.destroyAllWindows()
+    print("[INFO] Cleanup complete")
