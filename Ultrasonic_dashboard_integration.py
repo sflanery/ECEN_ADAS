@@ -2,6 +2,7 @@ from gpiozero import DistanceSensor
 import tkinter as tk
 from tkinter import font
 import requests
+import time
 
 # -----------------------------
 # API Configuration
@@ -35,12 +36,12 @@ sensor_front = DistanceSensor(echo=6, trigger=13, max_distance=2)
 # GUI setup
 # -----------------------------
 window = tk.Tk()
-window.title("Distance Measurement")
+window.title("Vehicle Distance Monitoring System")
 custom_font = font.Font(size=30)
 window.geometry("800x400")
 
-distance_label = tk.Label(window, text="Distance: ", anchor='center', font=custom_font)
-distance_label.pack()
+distance_label = tk.Label(window, text="Monitoring all sensors...", anchor='center', font=custom_font)
+distance_label.pack(expand=True)
 
 # -----------------------------
 # State tracking to avoid redundant API calls
@@ -52,10 +53,9 @@ last_collision_state = None
 # Distance measurement
 # -----------------------------
 def measure_distance():
-    """Measures distances and updates the label accordingly."""
     global last_blindspot_state, last_collision_state
     
-    distance_left = int(sensor_left.distance * 100)
+    distance_left = int(sensor_left.distance * 100)  # Convert to cm
     distance_right = int(sensor_right.distance * 100)
     distance_back = int(sensor_back.distance * 100)
     distance_front = int(sensor_front.distance * 100)
@@ -63,30 +63,65 @@ def measure_distance():
     blindspot_detected = False
     collision_detected = False
 
+    # Check sensors in priority order
     if distance_left < 101:
-        distance_label.config(fg="red", text=f"Left Blindspot Warning:\nVehicle is {distance_left} cm away!\n")
+        distance_label.config(
+            fg="red",
+            text=f"Left Blindspot Warning:\nVehicle is {distance_left} cm away!\n"
+        )
         blindspot_detected = True
 
     elif distance_right < 101:
-        distance_label.config(fg="red", text=f"Right Blind Spot Warning:\nVehicle is {distance_right} cm away!\n")
+        distance_label.config(
+            fg="red",
+            text=f"Right Blind Spot Warning:\nVehicle is {distance_right} cm away!\n"
+        )
         blindspot_detected = True
 
     elif distance_back < 101:
-        distance_label.config(fg="red", text=f"Warning: Object Behind\nVehicle {distance_back} cm away\n")
+        distance_label.config(
+            fg="red",
+            text=f"Warning: Object Behind\nVehicle {distance_back} cm away\n"
+        )
         collision_detected = True
 
     elif distance_front < 201:
-        distance_label.config(fg="red", text=f"Warning: Object In Front\nVehicle {distance_front} cm away")
+        distance_label.config(
+            fg="red",
+            text=f"Warning: Object In Front\nVehicle {distance_front} cm away"
+        )
         collision_detected = True
 
     else:
-        distance_label.config(fg="blue", text="Nothing Detected")
+        distance_label.config(
+            fg="blue",
+            text="All Sides Clear\nNo Obstacles Detected"
+        )
 
-    # Edge-triggered updates: only send API calls when state changes
+    # Only send API updates when state changes
     if blindspot_detected != last_blindspot_state:
         update_alert_via_api("blindSpot", blindspot_detected)
         last_blindspot_state = blindspot_detected
 
     if collision_detected != last_collision_state:
         update_alert_via_api("collision", collision_detected)
-        last_
+        last_collision_state = collision_detected
+
+    window.after(500, measure_distance)  # Check every 0.5 sec
+
+# -----------------------------
+# Cleanup on exit
+# -----------------------------
+def on_closing():
+    """Clear all alerts when closing window"""
+    update_alert_via_api("blindSpot", False)
+    update_alert_via_api("collision", False)
+    window.destroy()
+
+window.protocol("WM_DELETE_WINDOW", on_closing)
+
+# -----------------------------
+# Start measuring
+# -----------------------------
+measure_distance()
+window.mainloop()
