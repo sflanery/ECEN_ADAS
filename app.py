@@ -109,10 +109,10 @@ def update_alert_route():
         
         dashboard_state = get_dashboard_state_for_frontend()
         socketio.emit('dashboard_state_updated', dashboard_state)
-        print(f"[ROUTE] ✅ Alert updated successfully")
+        print(f"[ROUTE] âœ… Alert updated successfully")
         return jsonify({"message": f"Alert '{alert_type}' updated successfully"}), 200
     except Exception as e:
-        print(f"[ROUTE] ❌ Error updating alert: {e}")
+        print(f"[ROUTE] âŒ Error updating alert: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -177,7 +177,7 @@ def clear_database_route():
 def handle_connect():
     dashboard_state = get_dashboard_state_for_frontend()
     emit('dashboard_state_updated', dashboard_state)
-    print("🔗 Client connected, sent dashboard state")
+    print("ðŸ”— Client connected, sent dashboard state")
 
 # --------- MAIN ---------
 if __name__ == '__main__':
