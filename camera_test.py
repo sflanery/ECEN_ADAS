@@ -11,12 +11,14 @@ import cv2
 import numpy as np
 import torch
 from ultralytics import YOLO
+import re  # <-- added
 
 # =========================
 # API Configuration
 # =========================
 BASE_URL = "http://localhost:8080"
 API_TIMEOUT = 0.5  # shorter timeout to avoid blocking
+
 
 def update_alert_via_api(alert_type, status):
     """Update alert via Flask API (non-blocking)."""
@@ -29,6 +31,7 @@ def update_alert_via_api(alert_type, status):
     except Exception as e:
         pass  # Silent fail to avoid spam
 
+
 def update_traffic_sign_via_api(sign_type, value, distance):
     """Update traffic sign via Flask API (non-blocking)."""
     try:
@@ -39,6 +42,7 @@ def update_traffic_sign_via_api(sign_type, value, distance):
         )
     except Exception:
         pass  # Silent fail
+
 
 def update_speed_limit(new_limit):
     """Update speed limit sign."""
@@ -55,6 +59,8 @@ def update_speed_limit(new_limit):
             return True
     print("⚠️ Could not find speed limit sign")
     return False
+
+
 # =========================
 # Tunables
 # =========================
@@ -66,17 +72,17 @@ MAX_DET = 12
 # False-positive controls (per-detector thresholds)
 TH_CONF = {
     "light": 0.40,
-    "sign":  0.45,
+    "sign": 0.45,
     "pedestrian": 0.35,
 }
 MIN_AREA = {
     "light": 900,
-    "sign":  1200,
+    "sign": 1200,
     "pedestrian": 1600,
 }
 ASPECT_LIMITS = {
     "light": (0.5, 3.0),
-    "sign":  (0.5, 2.5),
+    "sign": (0.5, 2.5),
     "pedestrian": (1.3, 4.5),
 }
 
@@ -85,11 +91,14 @@ WINDOW = 5
 PERSIST_HITS = 2
 IOU_MATCH = 0.30
 
+
 # Optional ROI mask: only accept detections within this region
 def make_road_roi(size):
     m = np.zeros((size, size), np.uint8)
     m[size // 3:, :] = 1  # lower 2/3 of the frame
     return m
+
+
 ROI_MASK = make_road_roi(IMGSZ)  # set to None to disable
 
 TARGET_FPS = 10
@@ -103,18 +112,19 @@ torch.set_num_interop_threads(1)
 # Load models (CPU on Pi)
 # =========================
 light_model = YOLO("/home/sarsa/Traffic_lights_detection.pt")
-sign_model  = YOLO("/home/sarsa/new_traffic_signs.pt")
-ped_model   = YOLO("/home/sarsa/pedestrian_detection.pt")
+sign_model = YOLO("/home/sarsa/new_traffic_signs.pt")
+ped_model = YOLO("/home/sarsa/pedestrian_detection.pt")
 
 CLASSES_LIGHT = None
-CLASSES_SIGN  = None
-CLASSES_PED   = None
+CLASSES_SIGN = None
+CLASSES_PED = None
 
 # =========================
 # State tracking for alerts
 # =========================
 pedestrian_active = False
 last_sign_update = 0  # timestamp to rate-limit sign updates
+
 
 # =========================
 # Helpers
@@ -127,8 +137,9 @@ def letterbox(img: np.ndarray, size: int) -> np.ndarray:
     canvas = np.zeros((size, size, 3), dtype=np.uint8)
     top = (size - nh) // 2
     left = (size - nw) // 2
-    canvas[top:top+nh, left:left+nw] = resized
+    canvas[top:top + nh, left:left + nw] = resized
     return canvas
+
 
 def yolo_infer(model: YOLO, frame: np.ndarray, classes=None):
     """Run YOLO with fixed size; returns Ultralytics result object."""
@@ -144,6 +155,7 @@ def yolo_infer(model: YOLO, frame: np.ndarray, classes=None):
         verbose=False
     )[0]
 
+
 def iou(box_a, box_b):
     xa1, ya1, xa2, ya2 = box_a
     xb1, yb1, xb2, yb2 = box_b
@@ -154,6 +166,7 @@ def iou(box_a, box_b):
     area_a = (xa2 - xa1) * (ya2 - ya1)
     area_b = (xb2 - xb1) * (yb2 - yb1)
     return inter / max(area_a + area_b - inter, 1e-6)
+
 
 def box_ok(det_type, box, conf):
     """Apply per-detector confidence, size, aspect, and ROI filters."""
@@ -171,8 +184,28 @@ def box_ok(det_type, box, conf):
             return False
     return True
 
+
+def extract_speed_limit(cls_name: str, mph_min: int = 5, mph_max: int = 90):
+    """
+    Extract a 2–3 digit MPH value from a class label, e.g.:
+    'speed_45', 'limit-30', 'speed50mph', 'speedlimit_25', etc.
+    Returns int or None if not found or out of plausible range.
+    """
+    s = cls_name.lower()
+    m = re.search(r'(\d{2,3})\s*mph', s)
+    if not m:
+        m = re.search(r'(\d{2,3})', s)
+    if not m:
+        return None
+    val = int(m.group(1))
+    if mph_min <= val <= mph_max:
+        return val
+    return None
+
+
 class TemporalSmoother:
     """Require persistence: a box must match across >=PERSIST_HITS of last WINDOW frames."""
+
     def __init__(self, window=WINDOW, hits=PERSIST_HITS, iou_match=IOU_MATCH):
         self.window = window
         self.hits = hits
@@ -192,7 +225,9 @@ class TemporalSmoother:
                 accepted.append(b)
         return accepted
 
+
 smoother = TemporalSmoother()
+
 
 def summarize_detections(results_dict):
     per_type = defaultdict(Counter)
@@ -212,6 +247,7 @@ def summarize_detections(results_dict):
         segments.append(f"{det_type}:" + ",".join(parts))
     return True, " | ".join(segments)
 
+
 # =========================
 # Threaded frame grabber
 # =========================
@@ -221,7 +257,7 @@ class FrameGrabber:
         try:
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception:
-            pass
+                pass
         if not self.cap.isOpened():
             raise RuntimeError("Failed to open stream (URL/FFmpeg/OpenCV).")
         self.q = deque(maxlen=1)
@@ -250,12 +286,13 @@ class FrameGrabber:
             pass
         self.cap.release()
 
+
 # =========================
 # Main
 # =========================
 def main():
     global pedestrian_active, last_sign_update
-    
+
     grab = FrameGrabber(STREAM_URL)
     print("Stream opened successfully.")
     frame_idx = 0
@@ -294,12 +331,12 @@ def main():
                 names = res.names
                 xyxy = res.boxes.xyxy
                 conf = res.boxes.conf
-                cls  = res.boxes.cls
+                cls = res.boxes.cls
 
                 # Handle torch tensors vs numpy
                 if hasattr(xyxy, "cpu"): xyxy = xyxy.cpu().numpy()
-                if hasattr(conf, "cpu"):  conf  =  conf.cpu().numpy()
-                if hasattr(cls, "cpu"):   cls   =   cls.cpu().numpy()
+                if hasattr(conf, "cpu"):  conf = conf.cpu().numpy()
+                if hasattr(cls, "cpu"):   cls = cls.cpu().numpy()
 
                 # Collect filtered boxes per class
                 cls_to_boxes = defaultdict(list)
@@ -317,17 +354,29 @@ def main():
                         # Handle pedestrian alerts
                         if det_type == "pedestrian":
                             pedestrian_detected = True
-                        
+
                         # Handle traffic signs (rate-limited)
                         elif det_type == "sign":
                             now = time.time()
                             if now - last_sign_update > 2.0:  # Update max every 2 seconds
-                                if "speed" in cls_name.lower() or "limit" in cls_name.lower():
-                                    sign_detected = ("speed_limit", "50", f"{frame_idx}m")
-                                elif "stop" in cls_name.lower():
-                                    sign_detected = ("stop", "", f"{frame_idx}m")
-                                elif "yield" in cls_name.lower():
-                                    sign_detected = ("yield", "", f"{frame_idx}m")
+                                cls_lower = cls_name.lower()
+
+                                if "speed" in cls_lower or "limit" in cls_lower:
+                                    # parse numeric limit; fallback to 50 if none found
+                                    limit_val = extract_speed_limit(cls_lower)
+                                    if limit_val is None:
+                                        limit_val = 50
+                                    sign_detected = ("speed_limit", str(limit_val), f"{frame_idx}m")
+                                    update_traffic_sign_via_api(*sign_detected)
+                                    update_speed_limit(limit_val)
+                                    print(f"[SIGN] speed_limit {limit_val} MPH detected & updated")
+
+                                else:
+                                    # generic path for ANY other sign class
+                                    sign_detected = (cls_lower, "", f"{frame_idx}m")
+                                    update_traffic_sign_via_api(*sign_detected)
+                                    print(f"[SIGN] {cls_lower} detected (generic)")
+
                                 last_sign_update = now
 
             # Update pedestrian alert (edge-triggered)
@@ -339,12 +388,6 @@ def main():
                 update_alert_via_api("pedestrian", 0)
                 pedestrian_active = False
                 print("[CLEAR] Pedestrian cleared")
-
-            # Update traffic sign (if detected)
-            if sign_detected:
-                # if statements for new speed limit
-                update_traffic_sign_via_api(*sign_detected)
-                print(f"[SIGN] {sign_detected[0]} detected")
 
             # Telemetry
             frame_idx += 1
@@ -378,6 +421,7 @@ def main():
         grab.release()
         cv2.destroyAllWindows()
         print("Clean shutdown.")
+
 
 if __name__ == "__main__":
     main()
