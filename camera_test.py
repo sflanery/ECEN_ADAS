@@ -40,6 +40,21 @@ def update_traffic_sign_via_api(sign_type, value, distance):
     except Exception:
         pass  # Silent fail
 
+def update_speed_limit(new_limit):
+    """Update speed limit sign."""
+    state = requests.get(f"{BASE_URL}/get_state").json()
+    for sign in state['signs']:
+        if sign['type'] == 'speed_limit':
+            requests.post(f"{BASE_URL}/update_sign", json={
+                "id": sign['id'],
+                "type": "speed_limit",
+                "value": str(new_limit),
+                "distance": "50m"
+            })
+            print(f"🔄 Speed limit set to {new_limit} MPH")
+            return True
+    print("⚠️ Could not find speed limit sign")
+    return False
 # =========================
 # Tunables
 # =========================
@@ -327,6 +342,7 @@ def main():
 
             # Update traffic sign (if detected)
             if sign_detected:
+                # if statements for new speed limit
                 update_traffic_sign_via_api(*sign_detected)
                 print(f"[SIGN] {sign_detected[0]} detected")
 
