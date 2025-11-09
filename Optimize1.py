@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 import torch
 from ultralytics import YOLO
-import re  # <-- used by extract_speed_limit
+import re  # for speed limit extraction
 
 # =========================
 # API Configuration
@@ -68,7 +68,8 @@ def update_speed_limit(new_limit):
                 print(f"🔄 Speed limit set to {new_limit} MPH")
                 return True
             except Exception:
-                break
+                print("⚠️ Failed to update sign through API")
+                return False
 
     print("⚠️ Could not find speed limit sign")
     return False
@@ -82,9 +83,7 @@ IMGSZ = 384
 CONF_DEFAULT, IOU = 0.25, 0.45
 MAX_DET = 12
 
-# False-positive controls (per-*effective type* thresholds)
-# NOTE: effective types are "light" and "sign" for the merged model,
-# and "pedestrian" for the pedestrian model.
+# False-positive controls
 TH_CONF = {
     "light": 0.40,
     "sign": 0.45,
@@ -101,41 +100,42 @@ ASPECT_LIMITS = {
     "pedestrian": (1.3, 4.5),
 }
 
-# Temporal smoothing: require persistence across frames
+# Temporal smoothing
 WINDOW = 5
 PERSIST_HITS = 2
 IOU_MATCH = 0.30
 
-# Optional ROI mask: only accept detections within this region
+
 def make_road_roi(size):
+    """Define lower 2/3 of frame as ROI mask."""
     m = np.zeros((size, size), np.uint8)
-    m[size // 3:, :] = 1  # lower 2/3 of the frame
+    m[size // 3:, :] = 1
     return m
 
-ROI_MASK = make_road_roi(IMGSZ)  # set to None to disable
 
+ROI_MASK = make_road_roi(IMGSZ)
 TARGET_FPS = 10
 
-# Limit threading on ARM
+# Optimize threading on Pi
 cv2.setNumThreads(1)
 torch.set_num_threads(4)
 torch.set_num_interop_threads(1)
 
 # =========================
-# Load models (CPU on Pi)
+# Load models
 # =========================
-# NEW: merged lights+signs model + pedestrian model only
 merged_ls_model = YOLO("/home/sarsa/Traffic_Lights_Signs_Merged.pt")
-ped_model       = YOLO("/home/sarsa/pedestrian_detection.pt")
+ped_model = YOLO("/home/sarsa/pedestrian_detection.pt")
 
 # =========================
-# State tracking for alerts
+# State tracking
 # =========================
 pedestrian_active = False
-last_sign_update = 0  # timestamp to rate-limit sign updates
+last_sign_update = 0
+
 
 # =========================
-# Helpers
+# Helper functions
 # =========================
 def letterbox(img: np.ndarray, size: int) -> np.ndarray:
     h, w = img.shape[:2]
@@ -150,7 +150,6 @@ def letterbox(img: np.ndarray, size: int) -> np.ndarray:
 
 
 def yolo_infer(model: YOLO, frame: np.ndarray, classes=None):
-    """Run YOLO with fixed size; returns Ultralytics result object."""
     inp = letterbox(frame, IMGSZ)
     return model.predict(
         inp,
@@ -178,7 +177,6 @@ def iou(box_a, box_b):
 
 
 def box_ok(det_type, box, conf):
-    """Apply per-type confidence, size, aspect, and ROI filters."""
     x1, y1, x2, y2 = map(int, box)
     w, h = max(1, x2 - x1), max(1, y2 - y1)
     area = w * h
@@ -198,11 +196,6 @@ def box_ok(det_type, box, conf):
 
 
 def extract_speed_limit(cls_name: str, mph_min: int = 5, mph_max: int = 90):
-    """
-    Extract a 2–3 digit MPH value from a class label, e.g.:
-    'speed_45', 'limit-30', 'speed50mph', 'speedlimit_25', etc.
-    Returns int or None if not found or out of plausible range.
-    """
     s = cls_name.lower()
     m = re.search(r'(\d{2,3})\s*mph', s)
     if not m:
@@ -215,20 +208,12 @@ def extract_speed_limit(cls_name: str, mph_min: int = 5, mph_max: int = 90):
     return None
 
 
-# ----- NEW: helpers to map class names to "effective types" for thresholds -----
 def is_light_class(name: str) -> bool:
-    """
-    Decide if a merged-model class name should be treated as a traffic LIGHT.
-    Adjust tokens to match your label set if needed.
-    """
     s = name.lower()
-    # Generic heuristics that work for common label schemes:
     if "traffic_light" in s or "tl_" in s:
         return True
-    # If the name contains 'light' and a color, it's a light
     if "light" in s and any(col in s for col in ("red", "green", "yellow", "amber")):
         return True
-    # Explicit tokens you can expand:
     light_tokens = {
         "red", "green", "yellow", "amber",
         "light_red", "light_green", "light_yellow",
@@ -238,18 +223,14 @@ def is_light_class(name: str) -> bool:
 
 
 def effective_type_for(name: str) -> str:
-    """Return 'light' or 'sign' for merged model classes."""
     return "light" if is_light_class(name) else "sign"
 
 
 class TemporalSmoother:
-    """Require persistence: a box must match across >=PERSIST_HITS of last WINDOW frames."""
-
     def __init__(self, window=WINDOW, hits=PERSIST_HITS, iou_match=IOU_MATCH):
         self.window = window
         self.hits = hits
         self.iou_match = iou_match
-        # history[type][class_name] -> deque of lists of boxes
         self.history = defaultdict(lambda: defaultdict(lambda: deque(maxlen=window)))
 
     def update_and_accept(self, det_type, class_name, boxes):
@@ -270,32 +251,20 @@ smoother = TemporalSmoother()
 
 
 def summarize_detections(results_dict):
-    """
-    Build a human-readable summary string.
-    For the merged stream, bucket by effective type (light/sign).
-    For pedestrian, bucket under 'pedestrian'.
-    """
     per_type = defaultdict(Counter)
     detected_any = False
-
     for det_key, res in results_dict.items():
         if res is None or res.boxes is None or len(res.boxes) == 0:
             continue
-
         names = res.names
         cls_list = res.boxes.cls.tolist() if hasattr(res.boxes.cls, "tolist") else list(res.boxes.cls)
         for cls_id in cls_list:
             cls_name = names[int(cls_id)]
-            if det_key == "merged":
-                det_type = effective_type_for(cls_name)
-            else:
-                det_type = "pedestrian"
+            det_type = effective_type_for(cls_name) if det_key == "merged" else "pedestrian"
             per_type[det_type][cls_name] += 1
             detected_any = True
-
     if not detected_any:
         return False, "none"
-
     segments = []
     for det_type, counter in per_type.items():
         parts = [f"{cls}({n})" for cls, n in counter.most_common()]
@@ -304,7 +273,7 @@ def summarize_detections(results_dict):
 
 
 # =========================
-# Threaded frame grabber
+# Frame grabber
 # =========================
 class FrameGrabber:
     def __init__(self, src):
@@ -353,8 +322,6 @@ def main():
     frame_idx = 0
     k = 0
     last_print = 0.0
-
-    # Only two result streams now
     last_results = {"merged": None, "pedestrian": None}
 
     try:
@@ -365,16 +332,15 @@ def main():
                 time.sleep(0.002)
                 continue
 
-            # Round-robin: ONE model per loop (2 models)
+            # Round-robin: 2 models
             sel = k % 2
             t0 = time.perf_counter()
             if sel == 0:
-                last_results["merged"] = yolo_infer(merged_ls_model, frame, None)
+                last_results["merged"] = yolo_infer(merged_ls_model, frame)
             else:
-                last_results["pedestrian"] = yolo_infer(ped_model, frame, None)
+                last_results["pedestrian"] = yolo_infer(ped_model, frame)
             infer_ms = (time.perf_counter() - t0) * 1000.0
 
-            # -------- Filter + temporal smoothing + API updates --------
             pedestrian_detected = False
 
             for det_key, res in last_results.items():
@@ -386,32 +352,28 @@ def main():
                 conf = res.boxes.conf
                 cls = res.boxes.cls
 
-                # Handle torch tensors vs numpy
                 if hasattr(xyxy, "cpu"): xyxy = xyxy.cpu().numpy()
-                if hasattr(conf, "cpu"):  conf = conf.cpu().numpy()
-                if hasattr(cls, "cpu"):   cls = cls.cpu().numpy()
+                if hasattr(conf, "cpu"): conf = conf.cpu().numpy()
+                if hasattr(cls, "cpu"): cls = cls.cpu().numpy()
 
                 if det_key == "merged":
-                    # Bucket boxes by (effective_type -> cls_name)
-                    buckets = defaultdict(lambda: defaultdict(list))  # buckets[eff_type][cls_name] = [box+conf,...]
+                    buckets = defaultdict(lambda: defaultdict(list))
                     for i in range(len(cls)):
                         cls_name = names[int(cls[i])]
-                        eff_type = effective_type_for(cls_name)  # "light" or "sign"
+                        eff_type = effective_type_for(cls_name)
                         box = xyxy[i].tolist()
                         c = float(conf[i])
                         if box_ok(eff_type, box, c):
                             buckets[eff_type][cls_name].append(box + [c])
 
-                    # Temporal smoothing + actions
                     for eff_type, cls_map in buckets.items():
                         for cls_name, boxes in cls_map.items():
                             stable = smoother.update_and_accept(eff_type, cls_name, boxes)
                             if not stable:
                                 continue
-
                             if eff_type == "sign":
                                 now = time.time()
-                                if now - last_sign_update > 2.0:  # rate limit
+                                if now - last_sign_update > 2.0:
                                     cls_lower = cls_name.lower()
                                     if "speed" in cls_lower or "limit" in cls_lower:
                                         limit_val = extract_speed_limit(cls_lower) or 50
@@ -423,12 +385,7 @@ def main():
                                         print(f"[SIGN] {cls_lower} detected (generic)")
                                     last_sign_update = now
 
-                            elif eff_type == "light":
-                                # (Optional) handle specific light-state logic here if desired
-                                pass
-
-                else:  # det_key == "pedestrian"
-                    # Filter + smooth for pedestrians
+                else:  # pedestrian
                     cls_to_boxes = defaultdict(list)
                     for i in range(len(cls)):
                         cls_name = names[int(cls[i])]
@@ -442,7 +399,6 @@ def main():
                         if stable:
                             pedestrian_detected = True
 
-            # Update pedestrian alert (edge-triggered)
             if pedestrian_detected and not pedestrian_active:
                 update_alert_via_api("pedestrian", 1)
                 pedestrian_active = True
@@ -452,7 +408,6 @@ def main():
                 pedestrian_active = False
                 print("[CLEAR] Pedestrian cleared")
 
-            # Telemetry
             frame_idx += 1
             k += 1
 
@@ -468,7 +423,6 @@ def main():
                 )
                 last_print = now
 
-            # Pace only if ahead of target
             if TARGET_FPS:
                 budget = 1.0 / TARGET_FPS
                 spent = (time.perf_counter() - loop_start)
@@ -478,7 +432,6 @@ def main():
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
     finally:
-        # Clear alerts on exit
         if pedestrian_active:
             update_alert_via_api("pedestrian", 0)
         grab.release()
