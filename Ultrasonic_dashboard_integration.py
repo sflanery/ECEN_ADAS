@@ -3,7 +3,43 @@ import tkinter as tk
 from tkinter import font
 import requests
 import time
+import gpiod
+import time
 
+# -----------------------------
+# GPIO lines (BCM numbering)
+RELAY_LINE = 25
+STEERING_LINE = 18
+THROTTLE_LINE = 19
+
+CHIP = "/dev/gpiochip0"  # default GPIO chip
+
+# Initialize chip and lines
+chip = gpiod.Chip(CHIP)
+
+relay = chip.get_line(RELAY_LINE)
+steering = chip.get_line(STEERING_LINE)
+throttle = chip.get_line(THROTTLE_LINE)
+
+# Request lines as output
+relay.request(consumer="relay", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
+steering.request(consumer="steering", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
+throttle.request(consumer="throttle", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
+
+# Helper to generate a single PWM pulse
+def pwm_pulse(line, pulse_ms):
+    line.set_value(1)
+    time.sleep(pulse_ms / 1000.0)
+    line.set_value(0)
+
+# Helper for neutral pulse (~1.5 ms)
+def send_neutral():
+    for _ in range(50):  # 50 pulses = ~1 second at 50Hz
+        pwm_pulse(steering, 1.5)
+        pwm_pulse(throttle, 1.5)
+        time.sleep(0.0185)  # remaining time in 20ms period
+
+# -----------------------------
 # -----------------------------
 # API Configuration
 # -----------------------------
@@ -29,8 +65,8 @@ def update_alert_via_api(alert_type, status):
 # -----------------------------
 sensor_right = DistanceSensor(echo=24, trigger=23, max_distance=2)
 sensor_left = DistanceSensor(echo=16, trigger=12, max_distance=2)
-sensor_back = DistanceSensor(echo=17, trigger=27, max_distance=2)
-sensor_front = DistanceSensor(echo=6, trigger=13, max_distance=2)
+sensor_back = DistanceSensor(echo=6, trigger=13, max_distance=2)
+sensor_front = DistanceSensor(echo=17, trigger=27, max_distance=2)
 
 # -----------------------------
 # GUI setup
@@ -64,7 +100,21 @@ def measure_distance():
     collision_detected = False
 
     # Check sensors in priority order
-    if distance_left < 101:
+    if distance_front < 101:
+        distance_label.config(
+            fg="red",
+            text=f"Warning: Object In Front\nVehicle {distance_front} cm away"
+        )
+        collision_detected = True
+        relay.set_value(0)
+        relay.set_value(1)
+        pwm_pulse(throttle, 1.4)  # backward
+        pwm_pulse(steering, 1.5)  # neutral / straight
+        time.sleep(0.018)
+        send_neutral()
+        relay.set_value(0)
+
+    elif distance_left < 101:
         distance_label.config(
             fg="red",
             text=f"Left Blindspot Warning:\nVehicle is {distance_left} cm away!\n"
@@ -91,6 +141,13 @@ def measure_distance():
             text=f"Warning: Object In Front\nVehicle {distance_front} cm away"
         )
         collision_detected = True
+        relay.set_value(0)
+        relay.set_value(1)
+        pwm_pulse(throttle, 1.4)  # backward
+        pwm_pulse(steering, 1.5)  # neutral / straight
+        time.sleep(0.018)
+        send_neutral()
+        relay.set_value(0)
 
     else:
         distance_label.config(
