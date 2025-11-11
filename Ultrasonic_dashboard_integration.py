@@ -108,8 +108,6 @@ def measure_distance():
         collision_detected = True
         relay.set_value(0)
         relay.set_value(1)
-        pwm_pulse(throttle, 1.4)  # backward
-        pwm_pulse(steering, 1.5)  # neutral / straight
         time.sleep(0.018)
         send_neutral()
         relay.set_value(0)
@@ -134,20 +132,6 @@ def measure_distance():
             text=f"Warning: Object Behind\nVehicle {distance_back} cm away\n"
         )
         collision_detected = True
-
-    elif distance_front < 201:
-        distance_label.config(
-            fg="red",
-            text=f"Warning: Object In Front\nVehicle {distance_front} cm away"
-        )
-        collision_detected = True
-        relay.set_value(0)
-        relay.set_value(1)
-        pwm_pulse(throttle, 1.4)  # backward
-        pwm_pulse(steering, 1.5)  # neutral / straight
-        time.sleep(0.018)
-        send_neutral()
-        relay.set_value(0)
 
     else:
         distance_label.config(
