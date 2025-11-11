@@ -3,6 +3,48 @@ import numpy as np
 from picamera2 import Picamera2
 import requests
 
+# lane assist
+import gpiod
+import time
+
+# -----------------------------
+# GPIO lines (BCM numbering)
+RELAY_LINE = 25
+STEERING_LINE = 18
+THROTTLE_LINE = 19
+
+CHIP = "/dev/gpiochip0"  # default GPIO chip
+
+# Initialize chip and lines
+chip = gpiod.Chip(CHIP)
+
+relay = chip.get_line(RELAY_LINE)
+steering = chip.get_line(STEERING_LINE)
+throttle = chip.get_line(THROTTLE_LINE)
+
+# Request lines as output
+relay.request(consumer="relay", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
+steering.request(consumer="steering", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
+throttle.request(consumer="throttle", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
+
+# Helper to generate a single PWM pulse
+def pwm_pulse(line, pulse_ms):
+    line.set_value(1)
+    time.sleep(pulse_ms / 1000.0)
+    line.set_value(0)
+
+# Helper for neutral pulse (~1.5 ms)
+def send_neutral():
+    for _ in range(50):  # 50 pulses = ~1 second at 50Hz
+        pwm_pulse(steering, 1.5)
+        pwm_pulse(throttle, 1.5)
+        time.sleep(0.0185)  # remaining time in 20ms period
+
+# -----------------------------
+
+
+
+
 # -----------------------------
 # API Configuration
 # -----------------------------
@@ -79,16 +121,33 @@ try:
         frame2_processed = preprocess_for_ov5647(frame2)
 
         detected = detect_vertical_lines(frame1) or detect_vertical_lines(frame2_processed)
+        detected_left = detect_vertical_lines(frame2)
+        detected_right = detect_vertical_lines(frame1)
 
         # Edge-triggered logging: log only when detection state changes
         # capturing changes for the database
         if detected and not lane_logged:
             update_lane_departure_via_api(True)
             lane_logged = True
+
+
         elif not detected and lane_logged:
             update_lane_departure_via_api(False)
             lane_logged = False
-
+        if detected_left:
+            relay.set_value(0)
+            relay.set_value(1)
+            pwm_pulse(steering, 1.4)  # left
+            time.sleep(0.018)
+            send_neutral()
+            relay.set_value(0)
+        elif detected_right:
+            relay.set_value(0)
+            relay.set_value(1)
+            pwm_pulse(steering, 1.6)  # left
+            time.sleep(0.018)
+            send_neutral()
+            relay.set_value(0)
         # Display frames with simple 0/1 overlay
         text = f"Lane Detected: {int(detected)}"
         cv2.putText(frame1, text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
