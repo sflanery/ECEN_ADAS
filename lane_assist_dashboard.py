@@ -7,43 +7,50 @@ import requests
 import gpiod
 import time
 
-# -----------------------------
-# GPIO lines (BCM numbering)
+CHIP = "/dev/gpiochip0"
 RELAY_LINE = 25
-STEERING_LINE = 18
-THROTTLE_LINE = 19
+STEERING_RIGHT = 18
+STEERING_LEFT = 12
 
-CHIP = "/dev/gpiochip0"  # default GPIO chip
-
-# Initialize chip and lines
 chip = gpiod.Chip(CHIP)
-
 relay = chip.get_line(RELAY_LINE)
-steering = chip.get_line(STEERING_LINE)
-throttle = chip.get_line(THROTTLE_LINE)
+right = chip.get_line(STEERING_RIGHT)
+left = chip.get_line(STEERING_LEFT)
+#throttle = chip.get_line(THROTTLE_LINE)
 
-# Request lines as output
+right.request(consumer="right", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
 relay.request(consumer="relay", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
-steering.request(consumer="steering", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
-throttle.request(consumer="throttle", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
+left.request(consumer="left", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
+#throttle.request(consumer="throttle", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
 
-# Helper to generate a single PWM pulse
-def pwm_pulse(line, pulse_ms):
-    line.set_value(1)
-    time.sleep(pulse_ms / 1000.0)
-    line.set_value(0)
-
-# Helper for neutral pulse (~1.5 ms)
-def send_neutral():
-    for _ in range(50):  # 50 pulses = ~1 second at 50Hz
-        pwm_pulse(steering, 1.5)
-        pwm_pulse(throttle, 1.5)
-        time.sleep(0.0185)  # remaining time in 20ms period
-
-# -----------------------------
-
-
-
+def send_pwm(line, pulse_width_ms, duration_s):
+    period = 0.02  # 20 ms = 50 Hz
+    end_time = time.time() + duration_s
+    while time.time() < end_time:
+        line.set_value(1)
+        time.sleep(pulse_width_ms / 1000.0)
+        line.set_value(0)
+        time.sleep(period - pulse_width_ms / 1000.0)
+def send_pwm_inverted(line, pulse_width_ms, duration_s):
+    period = 0.02
+    end_time = time.time() + duration_s
+    while time.time() < end_time:
+        line.set_value(0)  # invert
+        time.sleep(pulse_width_ms / 1000.0)
+        line.set_value(1)
+        time.sleep(period - pulse_width_ms / 1000.0)
+def move_steering_left(pulse_width_ms, duration_s):
+    relay.set_value(1)               # Turn on relay
+    send_pwm_inverted(left, pulse_width_ms, duration_s)
+    relay.set_value(0)               # Turn off relay
+    left.set_value(0)
+         
+def move_steering_right(pulse_width_ms, duration_s):
+    relay.set_value(1)               # Turn on relay
+    send_pwm(right, pulse_width_ms, duration_s)
+    relay.set_value(0)               # Turn off relay
+    right.set_value(0)
+       
 
 # -----------------------------
 # API Configuration
@@ -88,28 +95,24 @@ def preprocess_for_ov5647(frame):
                        [-1, 5, -1],
                        [0, -1, 0]])
     return cv2.filter2D(enhanced, -1, kernel)
-    # this increases sensitivity to account for the car moving so quickly
 
 def detect_vertical_lines(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    # detects vertical lines using cv2 - already trained model
     edges = cv2.Canny(gray, 50, 150, apertureSize=3)
     lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 100, minLineLength=50, maxLineGap=10)
-    # specified thickness
     if lines is not None:
         for line in lines:
             x1, y1, x2, y2 = line[0]
-            # accounts for the fact that the angle that the car sees the lane will not always be perfectly vertical
             angle = np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi
             if 45 < abs(angle) < 150:
                 return True
-                # specific angle tolerance
     return False
 
 # -----------------------------
-# State variable to prevent repeated logging
+# State variables
 # -----------------------------
 lane_logged = False
+lane_correction_trigger = False
 
 # -----------------------------
 # Main loop
@@ -124,31 +127,42 @@ try:
         detected_left = detect_vertical_lines(frame2)
         detected_right = detect_vertical_lines(frame1)
 
-        # Edge-triggered logging: log only when detection state changes
-        # capturing changes for the database
+        # LEFT lane departure → invert direction
+        if detected_left:
+            if not lane_correction_trigger:
+                lane_correction_trigger = True
+                relay.set_value(1)
+                send_pwm_inverted(left, 1.6, .3)  # now goes left
+                #move_steering_left(1.8, 0.3)
+                time.sleep(0.018)
+                relay.set_value(0)
+                left.set_value(0)
+               # right.set_value(0)
+
+        # RIGHT lane departure → keep correct PWM
+        elif detected_right:
+            if not lane_correction_trigger:
+                lane_correction_trigger = True
+                relay.set_value(1)
+                send_pwm(right, 1.2, .3)  # correct
+                time.sleep(0.018)
+                relay.set_value(0)
+                right.set_value(0)
+              #  left.set_value(0)
+
+        # Reset the lane correction once no detection
+        if not detected:
+            lane_correction_trigger = False
+
+        # API notifications
         if detected and not lane_logged:
             update_lane_departure_via_api(True)
             lane_logged = True
-
-
         elif not detected and lane_logged:
             update_lane_departure_via_api(False)
             lane_logged = False
-        if detected_left:
-            relay.set_value(0)
-            relay.set_value(1)
-            pwm_pulse(steering, 1.4)  # left
-            time.sleep(0.018)
-            send_neutral()
-            relay.set_value(0)
-        elif detected_right:
-            relay.set_value(0)
-            relay.set_value(1)
-            pwm_pulse(steering, 1.6)  # left
-            time.sleep(0.018)
-            send_neutral()
-            relay.set_value(0)
-        # Display frames with simple 0/1 overlay
+
+        # Display frames
         text = f"Lane Detected: {int(detected)}"
         cv2.putText(frame1, text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
         cv2.putText(frame2, text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
