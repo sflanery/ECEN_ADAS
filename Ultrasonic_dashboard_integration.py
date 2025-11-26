@@ -6,40 +6,37 @@ import time
 import gpiod
 import time
 
-# -----------------------------
-# GPIO lines (BCM numbering)
+import gpiod
+import time
+
+CHIP = "/dev/gpiochip0"
 RELAY_LINE = 25
 STEERING_LINE = 18
 THROTTLE_LINE = 19
 
-CHIP = "/dev/gpiochip0"  # default GPIO chip
-
-# Initialize chip and lines
 chip = gpiod.Chip(CHIP)
-
 relay = chip.get_line(RELAY_LINE)
 steering = chip.get_line(STEERING_LINE)
 throttle = chip.get_line(THROTTLE_LINE)
 
-# Request lines as output
 relay.request(consumer="relay", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
 steering.request(consumer="steering", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
 throttle.request(consumer="throttle", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
 
-# Helper to generate a single PWM pulse
-def pwm_pulse(line, pulse_ms):
-    line.set_value(1)
-    time.sleep(pulse_ms / 1000.0)
-    line.set_value(0)
+def send_pwm(line, pulse_width_ms, duration_s):
+    """
+    Continuously send PWM to a line.
+    pulse_width_ms: 1.0 = full reverse, 1.5 = neutral, 2.0 = full forward
+    duration_s: total duration to send PWM
+    """
+    period = 0.02  # 20 ms = 50 Hz
+    end_time = time.time() + duration_s
+    while time.time() < end_time:
+        line.set_value(1)
+        time.sleep(pulse_width_ms / 1000.0)
+        line.set_value(0)
+        time.sleep(period - pulse_width_ms / 1000.0)
 
-# Helper for neutral pulse (~1.5 ms)
-def send_neutral():
-    for _ in range(50):  # 50 pulses = ~1 second at 50Hz
-        pwm_pulse(steering, 1.5)
-        pwm_pulse(throttle, 1.5)
-        time.sleep(0.0185)  # remaining time in 20ms period
-
-# -----------------------------
 # -----------------------------
 # API Configuration
 # -----------------------------
@@ -64,7 +61,7 @@ def update_alert_via_api(alert_type, status):
 # Sensor setup
 # -----------------------------
 sensor_right = DistanceSensor(echo=24, trigger=23, max_distance=2)
-sensor_left = DistanceSensor(echo=16, trigger=12, max_distance=2)
+sensor_left = DistanceSensor(echo=16, trigger=26, max_distance=2)
 sensor_back = DistanceSensor(echo=6, trigger=13, max_distance=2)
 sensor_front = DistanceSensor(echo=17, trigger=27, max_distance=2)
 
@@ -86,10 +83,16 @@ last_blindspot_state = None
 last_collision_state = None
 
 # -----------------------------
+# NEW: Track if braking has already happened
+# -----------------------------
+last_collision_trigger = False
+
+# -----------------------------
 # Distance measurement
 # -----------------------------
 def measure_distance():
     global last_blindspot_state, last_collision_state
+    global last_collision_trigger
     
     distance_left = int(sensor_left.distance * 100)  # Convert to cm
     distance_right = int(sensor_right.distance * 100)
@@ -99,19 +102,43 @@ def measure_distance():
     blindspot_detected = False
     collision_detected = False
 
-    # Check sensors in priority order
+    # FRONT COLLISION
     if distance_front < 101:
         distance_label.config(
             fg="red",
             text=f"Warning: Object In Front\nVehicle {distance_front} cm away"
         )
         collision_detected = True
-        relay.set_value(0)
-        relay.set_value(1)
-        time.sleep(0.018)
-        send_neutral()
-        relay.set_value(0)
 
+        # ---- AUTOMATIC BRAKING (only once) ----
+        if not last_collision_trigger:
+            last_collision_trigger = True
+            relay.set_value(1)
+            send_pwm(steering, 1.5, .3)
+            time.sleep(0.018)
+            relay.set_value(0)
+            steering.set_value(0)
+            throttle.set_value(0)
+
+    # BACK COLLISION
+    elif distance_back < 51:
+        distance_label.config(
+            fg="red",
+            text=f"Warning: Object Behind\nVehicle {distance_back} cm away\n"
+        )
+        collision_detected = True
+
+        # ---- AUTOMATIC BRAKING (only once) ----
+        if not last_collision_trigger:
+            last_collision_trigger = True
+            relay.set_value(1)
+            send_pwm(steering, 1.5, 0.35)
+            time.sleep(0.018)
+            relay.set_value(0)
+            steering.set_value(0)
+            throttle.set_value(0)
+
+    # LEFT BLINDSPOT
     elif distance_left < 101:
         distance_label.config(
             fg="red",
@@ -119,6 +146,7 @@ def measure_distance():
         )
         blindspot_detected = True
 
+    # RIGHT BLINDSPOT
     elif distance_right < 101:
         distance_label.config(
             fg="red",
@@ -126,18 +154,13 @@ def measure_distance():
         )
         blindspot_detected = True
 
-    elif distance_back < 101:
-        distance_label.config(
-            fg="red",
-            text=f"Warning: Object Behind\nVehicle {distance_back} cm away\n"
-        )
-        collision_detected = True
-
+    # ALL CLEAR → reset braking trigger
     else:
         distance_label.config(
             fg="blue",
             text="All Sides Clear\nNo Obstacles Detected"
         )
+        last_collision_trigger = False   # <---- reset when object is gone
 
     # Only send API updates when state changes
     if blindspot_detected != last_blindspot_state:
