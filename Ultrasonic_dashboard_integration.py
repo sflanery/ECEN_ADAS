@@ -111,14 +111,26 @@ def measure_distance():
         collision_detected = True
 
         # ---- AUTOMATIC BRAKING (only once) ----
+        
         if not last_collision_trigger:
             last_collision_trigger = True
             relay.set_value(1)
-            send_pwm(steering, 1.5, .3)
-            time.sleep(0.018)
+        
+        #send_pwm(steering, 1.5, .3)
+          # if (distace < 101):
+           #    sleep(0.001)
+            time.sleep(0.028)
+        
+      #  while distance_front < 101:
+        #    relay.set_value(1)
+        #    print ("here")
+          #  relay.set_value(0)
+       # steering.set_value(0)
+      #  throttle.set_value(0)
+            
+            last_collision_trigger = False
             relay.set_value(0)
-            steering.set_value(0)
-            throttle.set_value(0)
+            time.sleep(0.028)
 
     # BACK COLLISION
     elif distance_back < 51:
@@ -132,11 +144,13 @@ def measure_distance():
         if not last_collision_trigger:
             last_collision_trigger = True
             relay.set_value(1)
-            send_pwm(steering, 1.5, 0.35)
-            time.sleep(0.018)
+            #send_pwm(steering, 1.5, 0.35)
+            time.sleep(0.028)
             relay.set_value(0)
-            steering.set_value(0)
-            throttle.set_value(0)
+            last_collision_trigger = False
+            #steering.set_value(0)
+            #throttle.set_value(0)
+            time.sleep(0.028)
 
     # LEFT BLINDSPOT
     elif distance_left < 101:
