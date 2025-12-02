@@ -356,7 +356,8 @@ def main():
                             pedestrian_detected = True
 
                         # Handle traffic signs (rate-limited)
-                        elif det_type == "sign":
+                        #here
+                        elif det_type == "sign" or "light":
                             now = time.time()
                             if now - last_sign_update > 2.0:  # Update max every 2 seconds
                                 cls_lower = cls_name.lower()
@@ -378,6 +379,7 @@ def main():
                                     print(f"[SIGN] {cls_lower} detected (generic)")
 
                                 last_sign_update = now
+                            
 
             # Update pedestrian alert (edge-triggered)
             if pedestrian_detected and not pedestrian_active:
