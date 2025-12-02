@@ -2,11 +2,12 @@ import cv2
 import numpy as np
 from picamera2 import Picamera2
 import requests
-
-# lane assist
 import gpiod
 import time
 
+# -----------------------------
+# GPIO Setup
+# -----------------------------
 CHIP = "/dev/gpiochip0"
 RELAY_LINE = 25
 STEERING_RIGHT = 18
@@ -16,12 +17,10 @@ chip = gpiod.Chip(CHIP)
 relay = chip.get_line(RELAY_LINE)
 right = chip.get_line(STEERING_RIGHT)
 left = chip.get_line(STEERING_LEFT)
-#throttle = chip.get_line(THROTTLE_LINE)
 
 right.request(consumer="right", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
 relay.request(consumer="relay", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
 left.request(consumer="left", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
-#throttle.request(consumer="throttle", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
 
 def send_pwm(line, pulse_width_ms, duration_s):
     period = 0.02  # 20 ms = 50 Hz
@@ -31,6 +30,7 @@ def send_pwm(line, pulse_width_ms, duration_s):
         time.sleep(pulse_width_ms / 1000.0)
         line.set_value(0)
         time.sleep(period - pulse_width_ms / 1000.0)
+
 def send_pwm_inverted(line, pulse_width_ms, duration_s):
     period = 0.02
     end_time = time.time() + duration_s
@@ -39,18 +39,18 @@ def send_pwm_inverted(line, pulse_width_ms, duration_s):
         time.sleep(pulse_width_ms / 1000.0)
         line.set_value(1)
         time.sleep(period - pulse_width_ms / 1000.0)
+
 def move_steering_left(pulse_width_ms, duration_s):
-    relay.set_value(1)               # Turn on relay
+    relay.set_value(1)
     send_pwm_inverted(left, pulse_width_ms, duration_s)
-    relay.set_value(0)               # Turn off relay
+    relay.set_value(0)
     left.set_value(0)
          
 def move_steering_right(pulse_width_ms, duration_s):
-    relay.set_value(1)               # Turn on relay
+    relay.set_value(1)
     send_pwm(right, pulse_width_ms, duration_s)
-    relay.set_value(0)               # Turn off relay
+    relay.set_value(0)
     right.set_value(0)
-       
 
 # -----------------------------
 # API Configuration
@@ -60,17 +60,13 @@ BASE_URL = "http://localhost:8080"
 def update_lane_departure_via_api(detected):
     """Update laneDeparture alert via Flask API."""
     try:
-        response = requests.post(
+        requests.post(
             f"{BASE_URL}/update_alert",
             json={"type": "laneDeparture", "status": 1 if detected else 0},
             timeout=1
         )
-        if response.status_code == 200:
-            print(f"[API] Lane departure → {detected}")
-        else:
-            print(f"[API] Error: {response.status_code}")
-    except Exception as e:
-        print(f"[API] Failed to update: {e}")
+    except Exception:
+        pass  # Silent fail
 
 # -----------------------------
 # Camera setup
@@ -115,7 +111,7 @@ lane_logged = False
 lane_correction_trigger = False
 
 # -----------------------------
-# Main loop
+# Main loop (headless - completely silent)
 # -----------------------------
 try:
     while True:
@@ -132,23 +128,20 @@ try:
             if not lane_correction_trigger:
                 lane_correction_trigger = True
                 relay.set_value(1)
-                send_pwm_inverted(left, 1.6, .3)  # now goes left
-                #move_steering_left(1.8, 0.3)
+                send_pwm_inverted(left, 1.6, .3)
                 time.sleep(0.018)
                 relay.set_value(0)
                 left.set_value(0)
-               # right.set_value(0)
 
         # RIGHT lane departure → keep correct PWM
         elif detected_right:
             if not lane_correction_trigger:
                 lane_correction_trigger = True
                 relay.set_value(1)
-                send_pwm(right, 1.2, .3)  # correct
+                send_pwm(right, 1.2, .3)
                 time.sleep(0.018)
                 relay.set_value(0)
                 right.set_value(0)
-              #  left.set_value(0)
 
         # Reset the lane correction once no detection
         if not detected:
@@ -162,23 +155,12 @@ try:
             update_lane_departure_via_api(False)
             lane_logged = False
 
-        # Display frames
-        text = f"Lane Detected: {int(detected)}"
-        cv2.putText(frame1, text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-        cv2.putText(frame2, text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-
-        cv2.imshow("Camera 1 (Right)", frame1)
-        cv2.imshow("Camera 2 (Left)", frame2)
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+        # Small delay to prevent excessive CPU usage
+        time.sleep(0.05)
 
 except KeyboardInterrupt:
-    print("\n[INFO] Stopping lane assist...")
+    pass
 finally:
-    # -----------------------------
-    # Cleanup
-    # -----------------------------
     update_lane_departure_via_api(False)
-    cv2.destroyAllWindows()
-    print("[INFO] Cleanup complete")
+    camera1.stop()
+    camera2.stop()
