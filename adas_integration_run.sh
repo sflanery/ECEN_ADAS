@@ -36,8 +36,8 @@ sleep 3  # give backend time to start
 # ----------- ADDITIONAL PYTHON SCRIPTS ----------- #
 echo "Starting additional Python scripts..."
 /usr/bin/python3 /home/sarsa/lane_assist_dashboard.py &
-#/usr/bin/python3 /home/sarsa/ultrasonic_integration_dashboard.py &
-/usr/bin/python3 /home/sarsa/ultrasonic_individual_test.py &
+/usr/bin/python3 /home/sarsa/ultrasonic_integration_dashboard.py &
+#/usr/bin/python3 /home/sarsa/ultrasonic_individual_test.py &
 #/usr/bin/python3 /home/sarsa/camera_models.py &
 /usr/bin/python3 /home/sarsa/camera_test.py & #camera_test runs smoother than camera_models
 
@@ -45,7 +45,7 @@ echo "Starting additional Python scripts..."
 echo "Starting frontend..."
 cd /home/sarsa/dashtest_new/dashtest/car_dashboard
  npm run serve &
-
+sleep 2
 # ----------- CLEANUP ON EXIT ----------- #
 cleanup() {
     echo "Stopping all processes..."
