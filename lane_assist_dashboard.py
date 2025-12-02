@@ -6,35 +6,21 @@ import gpiod
 import time
 
 # -----------------------------
-# GPIO Setup - Request only when needed
+# GPIO Setup - DIFFERENT PINS than ultrasonic
 # -----------------------------
 CHIP = "/dev/gpiochip0"
-RELAY_LINE = 25
-STEERING_RIGHT = 18
-STEERING_LEFT = 12
+RELAY_LINE = 4        # DIFFERENT from ultrasonic (which uses 25)
+STEERING_RIGHT = 18   # Shared with ultrasonic - but different relay controls it
+STEERING_LEFT = 12    # Lane assist only
 
-def get_gpio_lines():
-    """Request GPIO lines - call this only when needed"""
-    chip = gpiod.Chip(CHIP)
-    relay = chip.get_line(RELAY_LINE)
-    right = chip.get_line(STEERING_RIGHT)
-    left = chip.get_line(STEERING_LEFT)
-    
-    relay.request(consumer="lane_relay", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
-    right.request(consumer="lane_right", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
-    left.request(consumer="lane_left", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
-    
-    return chip, relay, right, left
+chip = gpiod.Chip(CHIP)
+relay = chip.get_line(RELAY_LINE)
+right = chip.get_line(STEERING_RIGHT)
+left = chip.get_line(STEERING_LEFT)
 
-def release_gpio_lines(chip, relay, right, left):
-    """Release GPIO lines after use"""
-    try:
-        relay.release()
-        right.release()
-        left.release()
-        chip.close()
-    except Exception:
-        pass
+relay.request(consumer="lane_relay", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
+right.request(consumer="lane_right", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
+left.request(consumer="lane_left", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
 
 def send_pwm(line, pulse_width_ms, duration_s):
     period = 0.02  # 20 ms = 50 Hz
@@ -54,37 +40,17 @@ def send_pwm_inverted(line, pulse_width_ms, duration_s):
         line.set_value(1)
         time.sleep(period - pulse_width_ms / 1000.0)
 
-def correct_steering_left():
-    """Request GPIO, correct left, release GPIO"""
-    try:
-        chip, relay, right, left = get_gpio_lines()
-        relay.set_value(1)
-        #send_pwm(steering, 1.6, 0.35)
-        time.sleep(0.028)
-        relay.set_value(0)
-        last_collision_trigger = False
-        #steering.set_value(0)
-        #throttle.set_value(0)
-        time.sleep(0.028)
-        release_gpio_lines(chip, relay, right, left)
-    except Exception:
-        pass  # GPIO in use by another process
+def move_steering_left(pulse_width_ms, duration_s):
+    relay.set_value(1)
+    send_pwm_inverted(left, pulse_width_ms, duration_s)
+    relay.set_value(0)
+    left.set_value(0)
          
-def correct_steering_right():
-    """Request GPIO, correct right, release GPIO"""
-    try:
-        chip, relay, right, left = get_gpio_lines()
-        relay.set_value(1)
-        #send_pwm(steering, 1.4, 0.35)
-        time.sleep(0.028)
-        relay.set_value(0)
-        last_collision_trigger = False
-        #steering.set_value(0)
-        #throttle.set_value(0)
-        time.sleep(0.028)
-        release_gpio_lines(chip, relay, right, left)
-    except Exception:
-        pass  # GPIO in use by another process
+def move_steering_right(pulse_width_ms, duration_s):
+    relay.set_value(1)
+    send_pwm(right, pulse_width_ms, duration_s)
+    relay.set_value(0)
+    right.set_value(0)
 
 # -----------------------------
 # API Configuration
@@ -157,17 +123,25 @@ try:
         detected_left = detect_vertical_lines(frame2)
         detected_right = detect_vertical_lines(frame1)
 
-        # LEFT lane departure → correct with temporary GPIO access
+        # LEFT lane departure → invert direction
         if detected_left:
             if not lane_correction_trigger:
                 lane_correction_trigger = True
-                correct_steering_left()
+                relay.set_value(1)
+                send_pwm(left, 1.6, .3)
+                time.sleep(0.018)
+                relay.set_value(0)
+                left.set_value(0)
 
-        # RIGHT lane departure → correct with temporary GPIO access
+        # RIGHT lane departure → keep correct PWM
         elif detected_right:
             if not lane_correction_trigger:
                 lane_correction_trigger = True
-                correct_steering_right()
+                relay.set_value(1)
+                send_pwm(right, 1.2, .3)
+                time.sleep(0.018)
+                relay.set_value(0)
+                right.set_value(0)
 
         # Reset the lane correction once no detection
         if not detected:
