@@ -1,1 +1,9 @@
 To run programs together, run adas_integration_run.sh script. Ensure proper paths for front and backend
+
+HMI code is on a separate branch
+
+All files listed under a different name than thta found in the .sh file are either:
+  1. Test/debugging files
+  2. 403 Individual Team files
+
+For any additional questions contact sflanery@tamu.edu - repo owner
